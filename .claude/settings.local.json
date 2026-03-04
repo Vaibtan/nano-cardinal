@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:www.ycombinator.com)",
+      "Bash(git:*)",
+      "WebSearch",
+      "Bash(mv:*)"
+    ]
+  }
+}

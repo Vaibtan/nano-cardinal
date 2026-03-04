@@ -2,7 +2,7 @@
 
 \# PRD: Orion — AI Precision Outbound Engine  
 \#\#\# Inspired by Cardinal (YC W26)  
-\*\*Version:\*\* 3.1 (Corrected for schema/API/workflow consistency)  
+\*\*Version:\*\* 3.2 (Fixed enum casing, phase sequencing, missing env vars, signal types, streaming architecture)  
 \*\*Status:\*\* Ready for Implementation  
 \*\*Stack:\*\* FastAPI · NextJS · PostgreSQL · Redis · Qdrant · LangGraph
 
@@ -69,7 +69,7 @@ It replaces a 10-tool GTM stack with a single agentic platform.
 | **FastAPI** | REST API, SSE streams, webhook receivers, agent orchestration entrypoints |
 | **NextJS** | App Router frontend (SSR/CSR hybrid), dashboard pages, form workflows, SSE client |
 | **PostgreSQL** | Leads, ICPs, Sequences, Signals, Inbound Events, Sender Profile, Outreach Logs |
-| **Qdrant** | Vector embeddings of enriched lead profiles \+ winning email snippets for RAG |
+| **Qdrant** | Vector embeddings of enriched lead profiles \+ winning email snippets for RAG. Two collections: `leads` (semantic search) and `winning_snippets` (RAG for agent Node 3). Vector dimensions and distance metric are determined by `EMBEDDING_MODEL` config (e.g., 768 for text-embedding-004, 1536 for text-embedding-3-small). Distance: Cosine. |
 | **Redis** | ARQ job queue, enrichment result cache, signal dedup hashes |
 | **ARQ Workers** | Background enrichment, signal polling, inbound event processing, sequence execution |
 | **LangGraph** | Multi-step agent: Commonality Matching → Signal Selection → RAG → Draft → Critique → Tone |
@@ -286,12 +286,12 @@ text
 ## **3.3.1 Lead Data Model**
 
 python  
-`class LeadSource(str, Enum):`  
-    `CSV_IMPORT = "csv_import"`  
-    `YC_SCRAPER = "yc_scraper"`  
-    `MANUAL     = "manual"`  
-    `API        = "api"`  
-    `INBOUND    = "inbound"            # Set when created by Inbound Capture Engine`
+`class LeadSource(str, Enum):`
+    `CSV_IMPORT = "CSV_IMPORT"`
+    `YC_SCRAPER = "YC_SCRAPER"`
+    `MANUAL     = "MANUAL"`
+    `API        = "API"`
+    `INBOUND    = "INBOUND"            # Set when created by Inbound Capture Engine`
 
 `class EnrichmentStatus(str, Enum):`  
     `PENDING  = "PENDING"`  
@@ -347,14 +347,24 @@ python
     `# Signals`  
     `recent_signals: list[UUID]         # Derived field (not persisted column)`
 
-    `# Outreach`  
+    `# Outreach`
     `outreach_status: OutreachStatus`
 
-    `# Source tracking`  
-    `source: LeadSource`  
+    `# Source tracking`
+    `source: LeadSource`
     `inbound_event_id: Optional[UUID]     # FK if created by Inbound Capture Engine`
 
     `created_at: datetime`
+    `updated_at: datetime`
+
+**`3.3.1a Outreach Status Transition Rules`**
+
+`The lead.outreach_status field transitions as follows:`
+  `UNTOUCHED → IN_SEQUENCE:  When a LeadSequenceEnrollment is created for the lead`
+  `IN_SEQUENCE → REPLIED:    When enrollment.reply_received is set to true`
+  `IN_SEQUENCE → BOUNCED:    When a send attempt returns a bounce (logged in outreach_logs.replied_at=null + error)`
+  `Any status → UNTOUCHED:   Only if all enrollments are deleted/unsubscribed (manual reset)`
+`These transitions are enforced by the sequence enrollment service and the sequence execution worker.`
 
 ## **`3.3.2 Enrichment Pipeline (ARQ Worker)`**
 
@@ -432,6 +442,7 @@ python
 `GET    /api/v1/leads/{id}/similar           — Semantic similarity search in Qdrant (top-5)`  
 `DELETE /api/v1/leads/{id}                   — Delete lead`  
 `GET    /api/v1/leads/search?q=              — Semantic search across all leads`
+`GET    /api/v1/leads/{id}/outreach         — Outreach history for a lead (from outreach_logs)`
 
 ## **`Module 4: Signal Monitor`**
 
@@ -459,8 +470,9 @@ python
     `NEWS_MENTION           = "news_mention"`  
     `TECH_STACK_CHANGE      = "tech_stack_change"`  
 
-    `# Emitted from inbound bridge logic (Module 2)`  
-    `WEBSITE_VISIT          = "website_visit"`  
+    `# Emitted from inbound bridge logic (Module 2)`
+    `PRODUCT_SIGNUP         = "product_signup"`
+    `WEBSITE_VISIT          = "website_visit"`
     `CONFERENCE_ATTENDANCE  = "conference_attendance"`
 
 ## **`3.4.2 Signal Data Model`**
@@ -504,16 +516,18 @@ text
   `8. If signal_strength > AUTO_PERSONALIZE_THRESHOLD AND lead ICP score > 70:`  
        `→ Enqueue personalization draft generation job`
 
-`Inbound Bridge (inside inbound_worker):`  
-  `Map inbound events to high-intent signal types where applicable:`  
-  `- AD_CLICK / WEBSITE_OPT_IN -> WEBSITE_VISIT`  
+`Inbound Bridge (inside inbound_worker):`
+  `Map inbound events to high-intent signal types where applicable:`
+  `- PRODUCT_SIGNUP -> PRODUCT_SIGNUP (highest intent — user signed up for your product)`
+  `- AD_CLICK / WEBSITE_OPT_IN -> WEBSITE_VISIT`
   `- CONFERENCE_REGISTRATION -> CONFERENCE_ATTENDANCE`
 
 ## **3.4.4 Signal Strength Scoring**
 
 text  
-`Base score by type:`  
-  `WEBSITE_VISIT:         0.95   (highest — active intent)`  
+`Base score by type:`
+  `PRODUCT_SIGNUP:        0.98   (highest — signed up for your product)`
+  `WEBSITE_VISIT:         0.95   (active intent)`
   `FUNDING_ROUND:         0.90`  
   `JOB_CHANGE:            0.85`  
   `LEADERSHIP_HIRE:       0.80`  
@@ -540,7 +554,7 @@ text
 `POST   /api/v1/signals/poll               — Manually trigger a full signal poll cycle`  
 `PATCH  /api/v1/signals/{id}/read          — Mark signal as read`  
 `GET    /api/v1/events/stream?topic=signals — SSE stream for real-time new signals (filtered view)`  
-`DELETE /api/v1/signals/{id}              — Dismiss signal`
+`DELETE /api/v1/signals/{id}              — Dismiss signal (soft-delete: sets is_read=true and excluded from feed; does NOT hard-delete)`
 
 ## **Module 5: Commonalities & Personalization Engine**
 
@@ -627,8 +641,10 @@ python
 
 * `Pull last 5 signals from signals table for this lead, sorted by signal_strength DESC`
 
-**`Node 1.5 — Commonality Matcher (NEW):`**  
+**`Node 1.5 — Commonality Matcher (NEW):`**
  `LLM cross-references SenderProfile and Lead enriched data to extract genuine, non-trivial overlaps.`
+ `If no SenderProfile exists, this node is SKIPPED: commonalities=[], strongest_hook=null, hook_strength=0.`
+ `Node 4 then falls back to signal-based or company-observation opening (see draft writer rules).`
 
 `System: You are analyzing two professional profiles to find genuine shared experiences.`  
         `Non-trivial means: NOT "both work in tech" or "both use LinkedIn."`  
@@ -805,6 +821,10 @@ python
 
     **`token_usage: dict                    # {"prompt_tokens": int, "completion_tokens": int}`**
 
+    **`status: str                        # "DRAFT" | "APPROVED" | "SENT"`**
+
+    **`approved_at: Optional[datetime]`**
+
     **`generated_at: datetime`**
 
 **`API Endpoints:`**
@@ -846,6 +866,11 @@ python
     **`LINKEDIN_CONNECTION  = "LINKEDIN_CONNECTION"`**
 
     **`LINKEDIN_ENGAGE      = "LINKEDIN_ENGAGE"   # NEW: Like/comment on a post (warm-up)`**
+
+**`Channel/StepType Validation Rules (enforced at API and worker level):`**
+  **`ENGAGEMENT steps → only LINKEDIN_ENGAGE channel`**
+  **`OUTREACH steps → only EMAIL, LINKEDIN_MESSAGE, or LINKEDIN_CONNECTION`**
+  **`Creating a step with mismatched channel/type returns HTTP 422`**
 
 **`class StepType(str, Enum):`**
 
@@ -1367,7 +1392,21 @@ python
 
   **`| { type: "sequence.step.sent";           payload: { lead_id: string; sequence_id: string; step_number: number; channel: string } }`**
 
+  **`| { type: "lead.created";                  payload: { lead_id: string; source: string; company_name: string | null } }`**
+
   **`| { type: "worker.status";                payload: { worker: string; status: "running" | "idle" | "error"; queue_depth: number } }`**
+
+**`4.3.1 Token Streaming Architecture (Worker → Browser)`**
+
+**`LLM token streaming from background ARQ workers to the browser uses Redis Pub/Sub as the bridge:`**
+
+  **`1. ARQ worker generates tokens via LangGraph agent (streaming LLM call)`**
+  **`2. Each token is published to Redis channel: "sse:{draft_id}"`**
+  **`3. SSE endpoint (/api/v1/events/stream) subscribes to relevant Redis channels`**
+  **`4. SSE endpoint relays tokens as draft.token events to connected browsers`**
+  **`5. On completion, worker publishes final draft.generated event`**
+
+**`This decouples the worker (producer) from the API server (consumer) via Redis Pub/Sub.`**
 
 ---
 
@@ -1499,7 +1538,9 @@ python
 
     **`inbound_event_id UUID,           -- FK set after inbound_events table created`**
 
-    **`created_at TIMESTAMPTZ DEFAULT NOW()`**
+    **`created_at TIMESTAMPTZ DEFAULT NOW(),`**
+
+    **`updated_at TIMESTAMPTZ DEFAULT NOW()`**
 
 **`);`**
 
@@ -1537,7 +1578,7 @@ python
 
 **`);`**
 
-***`-- Add FK from leads to inbound_events`***
+***`-- Add FK from leads to inbound_events (circular FK — in SQLAlchemy, use relationship() with post_update=True)`***
 
 **`ALTER TABLE leads ADD CONSTRAINT fk_leads_inbound_event`**
 
@@ -1779,6 +1820,8 @@ python
 **`CREATE INDEX idx_drafts_enrollment_id ON personalization_drafts(enrollment_id);`**
 
 **`CREATE INDEX idx_outreach_logs_lead ON outreach_logs(lead_id);`**
+
+**`CREATE INDEX idx_leads_updated_at ON leads(updated_at DESC);`**
 
 ---
 
@@ -2044,8 +2087,6 @@ python
 
 **`text`**
 
-**`version: "3.9"`**
-
 **`services:`**
 
   **`postgres:`**
@@ -2120,6 +2161,8 @@ python
 
       **`CLEARBIT_API_KEY: ${CLEARBIT_API_KEY:-mock}`**
 
+      **`BUILTWITH_API_KEY: ${BUILTWITH_API_KEY:-mock}`**
+
       **`USE_MOCK_ENRICHMENT: ${USE_MOCK_ENRICHMENT:-true}`**
 
       **`USE_MOCK_SIGNALS: ${USE_MOCK_SIGNALS:-true}`**
@@ -2130,11 +2173,15 @@ python
 
       **`LLM_MODEL: ${LLM_MODEL:-gemini-2.5-flash}`**
 
+      **`EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-gemini}`**
+
       **`EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-004}`**
 
       **`AUTO_PERSONALIZE_THRESHOLD: ${AUTO_PERSONALIZE_THRESHOLD:-0.75}`**
 
       **`AUTO_ENROLL_ICP_THRESHOLD: ${AUTO_ENROLL_ICP_THRESHOLD:-70.0}`**
+
+      **`CRITIQUE_REWRITE_THRESHOLD: ${CRITIQUE_REWRITE_THRESHOLD:-7.0}`**
 
     **`depends_on:`**
 
@@ -2168,15 +2215,33 @@ python
 
       **`OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}`**
 
+      **`PROXYCURL_API_KEY: ${PROXYCURL_API_KEY:-mock}`**
+
+      **`HUNTER_API_KEY: ${HUNTER_API_KEY:-mock}`**
+
+      **`CLEARBIT_API_KEY: ${CLEARBIT_API_KEY:-mock}`**
+
+      **`BUILTWITH_API_KEY: ${BUILTWITH_API_KEY:-mock}`**
+
       **`LLM_PROVIDER: ${LLM_PROVIDER:-gemini}`**
 
       **`LLM_MODEL: ${LLM_MODEL:-gemini-2.5-flash}`**
+
+      **`EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-gemini}`**
 
       **`EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-004}`**
 
       **`USE_MOCK_ENRICHMENT: ${USE_MOCK_ENRICHMENT:-true}`**
 
       **`USE_MOCK_SIGNALS: ${USE_MOCK_SIGNALS:-true}`**
+
+      **`ENABLE_INBOUND_WEBHOOKS: ${ENABLE_INBOUND_WEBHOOKS:-true}`**
+
+      **`AUTO_PERSONALIZE_THRESHOLD: ${AUTO_PERSONALIZE_THRESHOLD:-0.75}`**
+
+      **`AUTO_ENROLL_ICP_THRESHOLD: ${AUTO_ENROLL_ICP_THRESHOLD:-70.0}`**
+
+      **`CRITIQUE_REWRITE_THRESHOLD: ${CRITIQUE_REWRITE_THRESHOLD:-7.0}`**
 
     **`depends_on:`**
 
@@ -2233,6 +2298,8 @@ python
 **`LLM_PROVIDER=gemini            # gemini | openai | ollama`**
 
 **`LLM_MODEL=gemini-2.5-flash     # e.g. gemini-2.5-flash | gpt-4.1-mini | llama3.1:8b`**
+
+**`EMBEDDING_PROVIDER=gemini          # gemini | openai | ollama (can differ from LLM_PROVIDER)`**
 
 **`EMBEDDING_MODEL=text-embedding-004  # e.g. text-embedding-004 | text-embedding-3-small | nomic-embed-text`**
 
@@ -2308,15 +2375,19 @@ python
 
 * **`Inbound ARQ worker (identity extraction → lead creation → enrichment trigger)`**
 
-* **`4 Signal ARQ workers (Funding, Hiring, LinkedIn, News) in mock mode`**
+* **`Inbound-to-signal bridge mappings (PRODUCT_SIGNUP -> PRODUCT_SIGNUP, AD_CLICK/OPT_IN -> WEBSITE_VISIT, CONFERENCE_REGISTRATION -> CONFERENCE_ATTENDANCE)`**
 
-* **`Inbound-to-signal bridge mappings (AD_CLICK/OPT_IN -> WEBSITE_VISIT, CONFERENCE_REGISTRATION -> CONFERENCE_ATTENDANCE)`**
+* **`4 Signal ARQ workers (Funding, Hiring, LinkedIn, News) in mock mode`**
 
 * **`Redis signal deduplication (SHA256 hash + TTL)`**
 
-* **`SSE event stream endpoint (/api/v1/events/stream)`**
+* **`SSE event stream endpoint (/api/v1/events/stream) with Redis Pub/Sub bridge for worker → browser streaming`**
 
 * **`Unified Signal + Inbound Feed UI with real-time SSE updates`**
+
+* **`NOTE: Inbound auto-routing to sequences (Step 6 of inbound pipeline) is implemented as a no-op`**
+  **`when no matching sequences exist. Full auto-routing tested in Phase 5 when Sequence CRUD is built.`**
+  **`All sequence/enrollment tables already exist from Phase 1 migrations.`**
 
 ## **`Phase 4 — Commonalities Engine + LangGraph Agent (Week 4)`**
 
@@ -2344,7 +2415,9 @@ python
 
 ## **`Phase 5 — Sequences + Engagement Steps (Week 5)`**
 
-* **`Sequence, SequenceStep, LeadSequenceEnrollment models + CRUD`**
+* **`Sequence, SequenceStep, LeadSequenceEnrollment CRUD endpoints`**
+
+* **`Channel/StepType validation (ENGAGEMENT → LINKEDIN_ENGAGE only; OUTREACH → EMAIL/LINKEDIN_MESSAGE/LINKEDIN_CONNECTION)`**
 
 * **`LINKEDIN_ENGAGE step type support in execution worker`**
 
@@ -2353,6 +2426,10 @@ python
 * **`Mock SMTP + LinkedIn mock logging`**
 
 * **`Auto-enrollment logic (sequence threshold with global fallback)`**
+
+* **`Activate and test inbound auto-routing (Phase 3 Step 6) end-to-end with real sequences`**
+
+* **`Outreach status transition logic (UNTOUCHED → IN_SEQUENCE on enrollment, → REPLIED on reply)`**
 
 * **`Sequence Builder UI with drag-and-drop step ordering + engagement step config`**
 
