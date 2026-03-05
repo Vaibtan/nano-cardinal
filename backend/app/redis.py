@@ -1,0 +1,8 @@
+"""Redis client for ARQ job queue and caching."""
+
+from redis.asyncio import Redis
+from app.config import settings
+
+redis_client = Redis.from_url(settings.REDIS_URL, decode_responses = True)
+
+async def get_redis() -> Redis: return redis_client

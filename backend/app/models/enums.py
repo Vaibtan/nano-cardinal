@@ -1,0 +1,84 @@
+"""Shared enums used across ORM models and schemas."""
+
+import enum
+
+
+class LeadSource(str, enum.Enum):
+    CSV_IMPORT = "CSV_IMPORT"
+    YC_SCRAPER = "YC_SCRAPER"
+    MANUAL = "MANUAL"
+    API = "API"
+    INBOUND = "INBOUND"
+
+
+class EnrichmentStatus(str, enum.Enum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    COMPLETE = "COMPLETE"
+    FAILED = "FAILED"
+
+
+class OutreachStatus(str, enum.Enum):
+    UNTOUCHED = "UNTOUCHED"
+    IN_SEQUENCE = "IN_SEQUENCE"
+    REPLIED = "REPLIED"
+    BOUNCED = "BOUNCED"
+
+
+class InboundEventType(str, enum.Enum):
+    PRODUCT_SIGNUP = "PRODUCT_SIGNUP"
+    AD_IMPRESSION = "AD_IMPRESSION"
+    AD_CLICK = "AD_CLICK"
+    LINKEDIN_LIKE = "LINKEDIN_LIKE"
+    LINKEDIN_COMMENT = "LINKEDIN_COMMENT"
+    LINKEDIN_CONNECTION = "LINKEDIN_CONNECTION"
+    WEBSITE_OPT_IN = "WEBSITE_OPT_IN"
+    CONFERENCE_REGISTRATION = "CONFERENCE_REGISTRATION"
+
+
+class SignalType(str, enum.Enum):
+    FUNDING_ROUND = "FUNDING_ROUND"
+    PRODUCT_LAUNCH = "PRODUCT_LAUNCH"
+    HIRING_SURGE = "HIRING_SURGE"
+    JOB_POSTING_ICP_ROLE = "JOB_POSTING_ICP_ROLE"
+    LEADERSHIP_HIRE = "LEADERSHIP_HIRE"
+    JOB_CHANGE = "JOB_CHANGE"
+    LINKEDIN_POST = "LINKEDIN_POST"
+    NEWS_MENTION = "NEWS_MENTION"
+    TECH_STACK_CHANGE = "TECH_STACK_CHANGE"
+    PRODUCT_SIGNUP = "PRODUCT_SIGNUP"
+    WEBSITE_VISIT = "WEBSITE_VISIT"
+    CONFERENCE_ATTENDANCE = "CONFERENCE_ATTENDANCE"
+
+
+class Channel(str, enum.Enum):
+    EMAIL = "EMAIL"
+    LINKEDIN_MESSAGE = "LINKEDIN_MESSAGE"
+    LINKEDIN_CONNECTION = "LINKEDIN_CONNECTION"
+    LINKEDIN_ENGAGE = "LINKEDIN_ENGAGE"
+
+
+class StepType(str, enum.Enum):
+    OUTREACH = "OUTREACH"
+    ENGAGEMENT = "ENGAGEMENT"
+
+
+class EnrollmentStatus(str, enum.Enum):
+    ACTIVE = "ACTIVE"
+    PAUSED = "PAUSED"
+    PENDING_APPROVAL = "PENDING_APPROVAL"
+    REPLIED = "REPLIED"
+    UNSUBSCRIBED = "UNSUBSCRIBED"
+    COMPLETED = "COMPLETED"
+
+
+class DraftStatus(str, enum.Enum):
+    DRAFT = "DRAFT"
+    APPROVED = "APPROVED"
+    SENT = "SENT"
+
+
+class HookType(str, enum.Enum):
+    COMMONALITY = "commonality"
+    SIGNAL = "signal"
+    NONE = "none"
