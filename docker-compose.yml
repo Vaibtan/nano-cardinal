@@ -1,0 +1,103 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: orion
+      POSTGRES_USER: orion
+      POSTGRES_PASSWORD: orion_secret
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orion -d orion"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  backend:
+    build: ./backend
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql+asyncpg://orion:orion_secret@postgres/orion
+      REDIS_URL: redis://redis:6379
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      PROXYCURL_API_KEY: ${PROXYCURL_API_KEY:-mock}
+      HUNTER_API_KEY: ${HUNTER_API_KEY:-mock}
+      CLEARBIT_API_KEY: ${CLEARBIT_API_KEY:-mock}
+      BUILTWITH_API_KEY: ${BUILTWITH_API_KEY:-mock}
+      USE_MOCK_ENRICHMENT: ${USE_MOCK_ENRICHMENT:-true}
+      USE_MOCK_SIGNALS: ${USE_MOCK_SIGNALS:-true}
+      ENABLE_INBOUND_WEBHOOKS: ${ENABLE_INBOUND_WEBHOOKS:-true}
+      LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
+      LLM_MODEL: ${LLM_MODEL:-gemini-2.5-flash}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-gemini}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-004}
+      AUTO_PERSONALIZE_THRESHOLD: ${AUTO_PERSONALIZE_THRESHOLD:-0.75}
+      AUTO_ENROLL_ICP_THRESHOLD: ${AUTO_ENROLL_ICP_THRESHOLD:-70.0}
+      CRITIQUE_REWRITE_THRESHOLD: ${CRITIQUE_REWRITE_THRESHOLD:-7.0}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+
+  worker:
+    build: ./backend
+    command: python -m arq app.workers.worker.WorkerSettings
+    environment:
+      DATABASE_URL: postgresql+asyncpg://orion:orion_secret@postgres/orion
+      REDIS_URL: redis://redis:6379
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      OLLAMA_BASE_URL: ${OLLAMA_BASE_URL:-http://host.docker.internal:11434}
+      PROXYCURL_API_KEY: ${PROXYCURL_API_KEY:-mock}
+      HUNTER_API_KEY: ${HUNTER_API_KEY:-mock}
+      CLEARBIT_API_KEY: ${CLEARBIT_API_KEY:-mock}
+      BUILTWITH_API_KEY: ${BUILTWITH_API_KEY:-mock}
+      USE_MOCK_ENRICHMENT: ${USE_MOCK_ENRICHMENT:-true}
+      USE_MOCK_SIGNALS: ${USE_MOCK_SIGNALS:-true}
+      ENABLE_INBOUND_WEBHOOKS: ${ENABLE_INBOUND_WEBHOOKS:-true}
+      LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
+      LLM_MODEL: ${LLM_MODEL:-gemini-2.5-flash}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-gemini}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-004}
+      AUTO_PERSONALIZE_THRESHOLD: ${AUTO_PERSONALIZE_THRESHOLD:-0.75}
+      AUTO_ENROLL_ICP_THRESHOLD: ${AUTO_ENROLL_ICP_THRESHOLD:-70.0}
+      CRITIQUE_REWRITE_THRESHOLD: ${CRITIQUE_REWRITE_THRESHOLD:-7.0}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+
+  frontend:
+    build: ./frontend
+    command: npm run dev
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:8000
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:

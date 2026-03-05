@@ -4,7 +4,24 @@
       "WebFetch(domain:www.ycombinator.com)",
       "Bash(git:*)",
       "WebSearch",
-      "Bash(mv:*)"
+      "Bash(mv:*)",
+      "Bash(python:*)",
+      "Bash(node:*)",
+      "Bash(npx create-next-app@latest:*)",
+      "Bash(npx shadcn@latest:*)",
+      "Bash(npm run:*)",
+      "Bash(npx eslint:*)",
+      "Bash(docker ps:*)",
+      "Bash(docker compose:*)",
+      "Bash(docker exec:*)",
+      "Bash(PGPASSWORD=orion_secret psql:*)",
+      "Bash(docker port:*)",
+      "Bash(netstat:*)",
+      "Bash(uv pip:*)"
     ]
-  }
+  },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "context7"
+  ]
 }
