@@ -64,7 +64,8 @@ async def build_heatmap(
     else:
         size_bucket_expr = case(*whens, else_=None)
 
-    # Query: group by (industry, size_bucket)
+    # Query: group by (industry, size_bucket) — includes NULL-size leads
+    # so we can count excluded rows without a separate query.
     stmt = (
         select(
             Lead.industry,
@@ -85,15 +86,19 @@ async def build_heatmap(
         )
         .where(Lead.icp_id == icp_id)
         .where(Lead.industry.in_(industries))
-        .where(Lead.company_size.isnot(None))
         .group_by(Lead.industry, size_bucket_expr)
     )
     result = await db.execute(stmt)
 
     # Build lookup: (industry, size_bucket) → stats
+    # Rows where size_bucket is None are leads with NULL or unbucketable
+    # company_size — count them as excluded.
     rows: dict[tuple[str, str], dict[str, int]] = {}
+    excluded_no_size = 0
     for r in result:
-        if r.size_bucket is not None:
+        if r.size_bucket is None:
+            excluded_no_size += r.captured
+        else:
             rows[(r.industry, r.size_bucket)] = {
                 "captured": r.captured,
                 "in_sequence": r.in_sequence or 0,
@@ -138,6 +143,8 @@ async def build_heatmap(
         total_tam_size=total_tam,
         total_captured=total_captured,
         overall_coverage_pct=round(overall, 1),
+        excluded_no_size=excluded_no_size,
+        tam_estimates_are_defaults=True,
     )
 
 

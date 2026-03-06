@@ -162,6 +162,12 @@ export default function LeadsPage() {
   const [outreachFilter, setOutreachFilter] = useState("");
   const [sourceFilter, setSourceFilter] = useState("");
   const [industryFilter, setIndustryFilter] = useState("");
+  const [debouncedIndustry, setDebouncedIndustry] = useState(industryFilter);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedIndustry(industryFilter), 300);
+    return () => clearTimeout(timer);
+  }, [industryFilter]);
 
   async function loadLeads() {
     setLoading(true);
@@ -173,7 +179,7 @@ export default function LeadsPage() {
         params.outreach_status = outreachFilter;
       if (sourceFilter && sourceFilter !== "all")
         params.source = sourceFilter;
-      if (industryFilter) params.industry = industryFilter;
+      if (debouncedIndustry) params.industry = debouncedIndustry;
       const data = await api.get<Lead[]>("/leads", params);
       setLeads(data);
     } catch (err) {
@@ -185,7 +191,8 @@ export default function LeadsPage() {
 
   useEffect(() => {
     loadLeads();
-  }, [enrichmentFilter, outreachFilter, sourceFilter, industryFilter]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [enrichmentFilter, outreachFilter, sourceFilter, debouncedIndustry]);
 
   async function handleEnrich(id: string) {
     try {

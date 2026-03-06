@@ -66,6 +66,7 @@ async def enrich_lead(ctx: dict, lead_id: str) -> None:
                 "are not implemented yet",
                 lead_id,
             )
+            raise
         except Exception:
             await _commit_failed_state(db, lead_id)
             raise

@@ -27,6 +27,8 @@ class TAMHeatmapResponse(BaseModel):
     total_tam_size: int
     total_captured: int
     overall_coverage_pct: float
+    excluded_no_size: int = 0
+    tam_estimates_are_defaults: bool = True
 
 
 class TAMWhitespaceResponse(BaseModel):
