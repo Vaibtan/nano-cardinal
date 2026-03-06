@@ -112,12 +112,12 @@ class Lead(Base):
     )
 
     # Relationships
-    icp = relationship("ICP", lazy="raise")
+    icp = relationship("ICP", lazy="selectin")
     inbound_event = relationship(
         "InboundEvent",
         foreign_keys=[inbound_event_id],
         post_update=True,
-        lazy="raise",
+        lazy="selectin",
     )
 
     __table_args__ = (

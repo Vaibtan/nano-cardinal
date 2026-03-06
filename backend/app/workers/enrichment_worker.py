@@ -12,7 +12,10 @@ from sqlalchemy.ext.asyncio import (
 from sqlalchemy.pool import NullPool
 
 from app.config import settings
-from app.services.enrichment import run_enrichment_pipeline
+from app.services.enrichment import (
+    RealIntegrationNotImplementedError,
+    run_enrichment_pipeline,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +32,19 @@ _worker_session_factory = async_sessionmaker(
 )
 
 
+async def _commit_failed_state(db: AsyncSession, lead_id: str) -> None:
+    """Persist FAILED status before returning or retrying."""
+    try:
+        await db.commit()
+    except Exception:
+        logger.warning(
+            "Could not commit FAILED status for lead %s", lead_id,
+            exc_info=True,
+        )
+        await db.rollback()
+        raise
+
+
 async def enrich_lead(ctx: dict, lead_id: str) -> None:
     """ARQ task: run the full enrichment pipeline for a lead.
 
@@ -43,13 +59,13 @@ async def enrich_lead(ctx: dict, lead_id: str) -> None:
             await run_enrichment_pipeline(lead_id, db)
             await db.commit()
             logger.info("Enrichment complete for lead %s", lead_id)
+        except RealIntegrationNotImplementedError:
+            await _commit_failed_state(db, lead_id)
+            logger.error(
+                "Real enrichment requested for lead %s but integrations "
+                "are not implemented yet",
+                lead_id,
+            )
         except Exception:
-            # Pipeline already set FAILED and flushed — commit that state.
-            try:
-                await db.commit()
-            except Exception:
-                logger.warning(
-                    "Could not commit FAILED status for lead %s", lead_id,
-                )
-                await db.rollback()
+            await _commit_failed_state(db, lead_id)
             raise

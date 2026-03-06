@@ -1,13 +1,15 @@
 """Unit tests for enrichment step functions (mock mode)."""
 
 import pytest
-from httpx import AsyncClient
 
+from app.config import settings
 from app.models.lead import Lead
 from app.services.enrichment import (
+    RealIntegrationNotImplementedError,
     build_embedding_text,
     step_company_enrichment,
     step_email_finder,
+    step_embedding_generation,
     step_github_enrichment,
     step_linkedin_enrichment,
 )
@@ -56,6 +58,32 @@ async def test_step_github_enrichment_without_url() -> None:
     lead = Lead()
     result = await step_github_enrichment(lead, {})
     assert "github" not in result
+
+
+async def test_real_mode_fails_fast_in_enrichment_steps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "USE_MOCK_ENRICHMENT", False)
+    lead = Lead(
+        first_name="Alice",
+        company_domain="example.com",
+        github_url="https://github.com/alice",
+    )
+
+    with pytest.raises(RealIntegrationNotImplementedError):
+        await step_email_finder(lead, {})
+
+    with pytest.raises(RealIntegrationNotImplementedError):
+        await step_linkedin_enrichment(lead, {})
+
+    with pytest.raises(RealIntegrationNotImplementedError):
+        await step_company_enrichment(lead, {})
+
+    with pytest.raises(RealIntegrationNotImplementedError):
+        await step_github_enrichment(lead, {})
+
+    with pytest.raises(RealIntegrationNotImplementedError):
+        await step_embedding_generation(lead, {}, db=None)
 
 
 # ── Embedding text builder ───────────────────────────────────

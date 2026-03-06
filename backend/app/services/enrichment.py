@@ -9,9 +9,8 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, NoReturn
 
-from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -19,6 +18,18 @@ from app.models.enums import EnrichmentStatus
 from app.models.lead import Lead
 
 logger = logging.getLogger(__name__)
+
+
+class RealIntegrationNotImplementedError(RuntimeError):
+    """Raised when real enrichment is requested but not implemented."""
+
+
+def _require_real_integration(step_name: str) -> NoReturn:
+    """Fail fast instead of silently falling back to mock data."""
+    raise RealIntegrationNotImplementedError(
+        f"{step_name} integration is not implemented. "
+        "Keep USE_MOCK_ENRICHMENT=true until the real provider is wired.",
+    )
 
 
 # ── Mock fixtures ────────────────────────────────────────────
@@ -92,8 +103,7 @@ async def step_email_finder(
     if settings.USE_MOCK_ENRICHMENT:
         result = _mock_email(lead)
     else:
-        # TODO: Integrate Hunter.io API
-        result = _mock_email(lead)
+        _require_real_integration("Hunter.io email finder")
 
     enriched["email_finder"] = result
     if not lead.email and result.get("email"):
@@ -109,8 +119,7 @@ async def step_linkedin_enrichment(
     if settings.USE_MOCK_ENRICHMENT:
         result = _mock_linkedin(lead)
     else:
-        # TODO: Integrate Proxycurl API
-        result = _mock_linkedin(lead)
+        _require_real_integration("Proxycurl LinkedIn enrichment")
 
     enriched["linkedin"] = result
     return enriched
@@ -124,8 +133,7 @@ async def step_company_enrichment(
     if settings.USE_MOCK_ENRICHMENT:
         result = _mock_company(lead)
     else:
-        # TODO: Integrate Clearbit + BuiltWith APIs
-        result = _mock_company(lead)
+        _require_real_integration("Clearbit/BuiltWith company enrichment")
 
     enriched["company"] = result
     return enriched
@@ -142,8 +150,7 @@ async def step_github_enrichment(
     if settings.USE_MOCK_ENRICHMENT:
         result = _mock_github(lead)
     else:
-        # TODO: Integrate GitHub API
-        result = _mock_github(lead)
+        _require_real_integration("GitHub enrichment")
 
     enriched["github"] = result
     return enriched
@@ -207,8 +214,7 @@ async def step_embedding_generation(
 
         enriched["_embedding"] = generate_mock_embedding(text)
     else:
-        # TODO: Call real embedding API (OpenAI/Gemini/Ollama)
-        pass
+        _require_real_integration("Embedding provider")
 
     return enriched
 

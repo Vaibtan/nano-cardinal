@@ -16,12 +16,13 @@ from fastapi import (
     UploadFile,
     status,
 )
-from sqlalchemy import select, text
+from pgvector.sqlalchemy import Vector
+from sqlalchemy import bindparam, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import get_db
-from app.embeddings import generate_mock_embedding
+from app.embeddings import VECTOR_DIMENSION, generate_mock_embedding
 from app.models.enums import LeadSource
 from app.models.lead import Lead
 from app.models.outreach import OutreachLog
@@ -54,12 +55,16 @@ async def _cosine_search(
     exclude_id: uuid.UUID | None = None,
 ) -> list[dict]:
     """Find leads closest to *embedding* by cosine distance."""
-    vec_str = "[" + ",".join(str(v) for v in embedding) + "]"
+    embedding_param = bindparam(
+        "query_embedding",
+        value=embedding,
+        type_=Vector(VECTOR_DIMENSION),
+    )
     stmt = (
         select(
             Lead,
             Lead.embedding.cosine_distance(
-                text(f"'{vec_str}'::vector"),
+                embedding_param,
             ).label("distance"),
         )
         .where(Lead.embedding.isnot(None))
@@ -90,7 +95,7 @@ async def create_lead(
     body: LeadCreate,
     db: AsyncSession = Depends(get_db),
 ) -> Lead:
-    """Create a single lead and enqueue enrichment."""
+    """Create a single lead."""
     lead = Lead(**body.model_dump())
     db.add(lead)
     await db.flush()
