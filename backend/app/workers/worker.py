@@ -6,6 +6,7 @@ Start with:  python -m arq app.workers.worker.WorkerSettings
 from arq.connections import RedisSettings
 
 from app.config import settings
+from app.workers.enrichment_worker import enrich_lead
 
 
 async def startup(ctx: dict) -> None:
@@ -20,6 +21,6 @@ class WorkerSettings:
     """ARQ worker configuration."""
 
     redis_settings = RedisSettings.from_dsn(settings.REDIS_URL)
-    functions: list = []
+    functions = [enrich_lead]
     on_startup = startup
     on_shutdown = shutdown
