@@ -67,15 +67,30 @@ class EnrollmentStatus(str, enum.Enum):
     ACTIVE = "ACTIVE"
     PAUSED = "PAUSED"
     PENDING_APPROVAL = "PENDING_APPROVAL"
+    BOUNCED = "BOUNCED"
     REPLIED = "REPLIED"
     UNSUBSCRIBED = "UNSUBSCRIBED"
     COMPLETED = "COMPLETED"
+
+
+class PausedReason(str, enum.Enum):
+    USER = "USER"
+    SEQUENCE_DEACTIVATED = "SEQUENCE_DEACTIVATED"
 
 
 class DraftStatus(str, enum.Enum):
     DRAFT = "DRAFT"
     APPROVED = "APPROVED"
     SENT = "SENT"
+
+
+class DeliveryStatus(str, enum.Enum):
+    PENDING = "PENDING"
+    SENT = "SENT"
+    REPLIED = "REPLIED"
+    BOUNCED = "BOUNCED"
+    ENGAGED = "ENGAGED"
+    FAILED = "FAILED"
 
 
 class HookType(str, enum.Enum):

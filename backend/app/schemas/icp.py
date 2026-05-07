@@ -18,6 +18,10 @@ class ICPConfigSchema(BaseModel):
     departments: list[str] = Field(default_factory=list)
     tech_stack: list[str] = Field(default_factory=list)
     regions: list[str] = Field(default_factory=list)
+    selected_signal_types: list[str] = Field(default_factory=list)
+    signal_recency_days: int = Field(default=30, ge=1, le=365)
+    min_signal_strength: float = Field(default=0.0, ge=0.0, le=1.0)
+    signal_keywords: list[str] = Field(default_factory=list)
 
 
 class ICPWeightsSchema(BaseModel):
@@ -70,3 +74,16 @@ class ICPRead(BaseModel):
     updated_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class ICPMatchPreviewRequest(BaseModel):
+    """Request body for live ICP matching preview."""
+
+    config: ICPConfigSchema = Field(default_factory=ICPConfigSchema)
+
+
+class ICPMatchPreviewResponse(BaseModel):
+    """Lead-count preview for an unsaved ICP config."""
+
+    matching_count: int
+    total_leads: int

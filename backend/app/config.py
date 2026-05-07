@@ -41,6 +41,12 @@ class Settings(BaseSettings):
     USE_MOCK_ENRICHMENT: bool = True
     USE_MOCK_SIGNALS: bool = True
     ENABLE_INBOUND_WEBHOOKS: bool = True
+    MOCK_SMTP_MODE: str = "deterministic"
+    MOCK_SMTP_BOUNCE_DOMAINS: str = "bounce.test"
+    MOCK_SMTP_REPLY_DOMAINS: str = "reply.test"
+    MOCK_SMTP_BOUNCE_RATE: float = 0.0
+    MOCK_SMTP_REPLY_RATE: float = 0.0
+    MOCK_SMTP_RANDOM_SEED: int = 42
 
     # ── Thresholds ───────────────────────────────────────────
     AUTO_PERSONALIZE_THRESHOLD: float = 0.75

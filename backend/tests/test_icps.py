@@ -69,6 +69,43 @@ async def test_list_icps_active_filter(
     assert len(resp.json()) == 0
 
 
+async def test_icp_match_count_preview(client: AsyncClient) -> None:
+    await client.post(
+        "/api/v1/leads",
+        json={
+            "company_name": "Acme",
+            "industry": "SaaS",
+            "company_size": 120,
+            "title": "CTO",
+            "tech_stack": ["Python", "React"],
+        },
+    )
+    await client.post(
+        "/api/v1/leads",
+        json={
+            "company_name": "HealthCo",
+            "industry": "Healthcare",
+            "company_size": 900,
+            "title": "CFO",
+        },
+    )
+
+    resp = await client.post(
+        f"{_BASE}/match-count",
+        json={
+            "config": {
+                "industries": ["SaaS"],
+                "company_sizes": ["50-200"],
+                "titles": ["CTO"],
+            },
+        },
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data == {"matching_count": 1, "total_leads": 2}
+
+
 async def test_get_icp(
     client: AsyncClient, sample_icp: dict,
 ) -> None:

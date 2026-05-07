@@ -81,6 +81,9 @@ class Lead(Base):
     outreach_status: Mapped[str] = mapped_column(
         String, default="UNTOUCHED", server_default="UNTOUCHED",
     )
+    last_contacted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+    )
 
     # Embedding (pgvector)
     embedding = mapped_column(
@@ -125,5 +128,6 @@ class Lead(Base):
         Index("idx_leads_enrichment_status", enrichment_status),
         Index("idx_leads_source", source),
         Index("idx_leads_outreach_status", outreach_status),
+        Index("idx_leads_last_contacted_at", last_contacted_at.desc()),
         Index("idx_leads_updated_at", updated_at.desc()),
     )

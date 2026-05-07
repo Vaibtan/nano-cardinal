@@ -13,6 +13,7 @@ from sqlalchemy import (
     Text,
     Uuid,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -52,6 +53,11 @@ class Signal(Base):
     detected_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(),
     )
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("NOW() + INTERVAL '90 days'"),
+    )
 
     lead = relationship("Lead", lazy="selectin")
 
@@ -64,4 +70,5 @@ class Signal(Base):
         Index(
             "idx_signals_strength", signal_strength.desc(),
         ),
+        Index("idx_signals_expires_at", expires_at),
     )

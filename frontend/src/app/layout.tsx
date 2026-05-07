@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import Link from "next/link";
 import "./globals.css";
+import { Providers } from "./providers";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -61,7 +62,7 @@ export default function RootLayout({
 
           {/* Main content */}
           <main className="flex-1 overflow-y-auto p-6">
-            {children}
+            <Providers>{children}</Providers>
           </main>
         </div>
       </body>
