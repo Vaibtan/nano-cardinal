@@ -1,6 +1,11 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { zodResolver } from "@hookform/resolvers/zod";
+import { useEffect } from "react";
+import { useForm, useWatch } from "react-hook-form";
+import { z } from "zod";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -11,13 +16,10 @@ import {
 } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { api } from "@/lib/api-client";
 
-/* ── Types ─────────────────────────────────────────────── */
-
-interface SenderProfile {
+type SenderProfile = {
   id: string;
   user_id: string;
   name: string;
@@ -31,9 +33,9 @@ interface SenderProfile {
   languages_spoken: string[];
   conferences_attended: string[];
   updated_at: string;
-}
+};
 
-const LIST_FIELDS = [
+const listFields = [
   { key: "education", label: "Education" },
   { key: "past_employers", label: "Past Employers" },
   { key: "cities_lived", label: "Cities Lived" },
@@ -43,9 +45,37 @@ const LIST_FIELDS = [
   { key: "conferences_attended", label: "Conferences Attended" },
 ] as const;
 
-type ListFieldKey = (typeof LIST_FIELDS)[number]["key"];
+const senderSchema = z.object({
+  name: z.string().min(1, "Name is required"),
+  current_title: z.string().optional(),
+  current_company: z.string().optional(),
+  education: z.array(z.string()),
+  past_employers: z.array(z.string()),
+  cities_lived: z.array(z.string()),
+  hobbies_and_interests: z.array(z.string()),
+  investors: z.array(z.string()),
+  languages_spoken: z.array(z.string()),
+  conferences_attended: z.array(z.string()),
+});
 
-/* ── Dynamic Array Input ───────────────────────────────── */
+type SenderFormValues = z.infer<typeof senderSchema>;
+
+const defaultValues: SenderFormValues = {
+  name: "",
+  current_title: "",
+  current_company: "",
+  education: [],
+  past_employers: [],
+  cities_lived: [],
+  hobbies_and_interests: [],
+  investors: [],
+  languages_spoken: [],
+  conferences_attended: [],
+};
+
+function cleanList(values: string[]) {
+  return values.map((value) => value.trim()).filter(Boolean);
+}
 
 function ArrayField({
   label,
@@ -54,64 +84,42 @@ function ArrayField({
 }: {
   label: string;
   values: string[];
-  onChange: (v: string[]) => void;
+  onChange: (values: string[]) => void;
 }) {
-  function handleAdd() {
-    onChange([...values, ""]);
-  }
-
-  function handleChange(idx: number, val: string) {
+  function update(index: number, value: string) {
     const next = [...values];
-    next[idx] = val;
+    next[index] = value;
     onChange(next);
-  }
-
-  function handleRemove(idx: number) {
-    onChange(values.filter((_, i) => i !== idx));
-  }
-
-  function handleKeyDown(
-    e: React.KeyboardEvent<HTMLInputElement>,
-    idx: number,
-  ) {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      if (values[idx].trim()) handleAdd();
-    }
   }
 
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between">
         <Label>{label}</Label>
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          onClick={handleAdd}
-        >
+        <Button type="button" variant="ghost" size="sm" onClick={() => onChange([...values, ""])}>
           + Add
         </Button>
       </div>
-      {values.length === 0 && (
-        <p className="text-xs text-muted-foreground">
-          None added yet.
-        </p>
-      )}
-      {values.map((v, i) => (
-        <div key={i} className="flex gap-2">
+      {values.length === 0 && <p className="text-xs text-muted-foreground">None added yet.</p>}
+      {values.map((value, index) => (
+        <div key={`${label}-${index}`} className="flex gap-2">
           <Input
-            value={v}
-            onChange={(e) => handleChange(i, e.target.value)}
-            onKeyDown={(e) => handleKeyDown(e, i)}
-            placeholder={`${label} ${i + 1}`}
+            value={value}
+            onChange={(event) => update(index, event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && value.trim()) {
+                event.preventDefault();
+                onChange([...values, ""]);
+              }
+            }}
+            placeholder={`${label} ${index + 1}`}
           />
           <Button
             type="button"
             variant="ghost"
             size="sm"
-            className="text-destructive shrink-0"
-            onClick={() => handleRemove(i)}
+            className="shrink-0 text-destructive"
+            onClick={() => onChange(values.filter((_, itemIndex) => itemIndex !== index))}
           >
             Remove
           </Button>
@@ -121,106 +129,89 @@ function ArrayField({
   );
 }
 
-/* ── Sender Profile Page ───────────────────────────────── */
+function profileToForm(profile: SenderProfile | null): SenderFormValues {
+  if (!profile) return defaultValues;
+  return {
+    name: profile.name,
+    current_title: profile.current_title ?? "",
+    current_company: profile.current_company ?? "",
+    education: profile.education ?? [],
+    past_employers: profile.past_employers ?? [],
+    cities_lived: profile.cities_lived ?? [],
+    hobbies_and_interests: profile.hobbies_and_interests ?? [],
+    investors: profile.investors ?? [],
+    languages_spoken: profile.languages_spoken ?? [],
+    conferences_attended: profile.conferences_attended ?? [],
+  };
+}
 
 export default function SenderPage() {
-  const [profile, setProfile] = useState<SenderProfile | null>(
-    null,
-  );
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
+  const queryClient = useQueryClient();
+  const form = useForm<SenderFormValues>({
+    resolver: zodResolver(senderSchema),
+    defaultValues,
+  });
+  const watchedValues = useWatch({ control: form.control });
 
-  // Form state
-  const [name, setName] = useState("");
-  const [currentTitle, setCurrentTitle] = useState("");
-  const [currentCompany, setCurrentCompany] = useState("");
-  const [lists, setLists] = useState<Record<ListFieldKey, string[]>>({
-    education: [],
-    past_employers: [],
-    cities_lived: [],
-    hobbies_and_interests: [],
-    investors: [],
-    languages_spoken: [],
-    conferences_attended: [],
+  const profileQuery = useQuery({
+    queryKey: ["sender-profile"],
+    queryFn: async () => {
+      try {
+        return await api.get<SenderProfile>("/sender");
+      } catch {
+        return null;
+      }
+    },
   });
 
-  async function loadProfile() {
-    setLoading(true);
-    try {
-      const data = await api.get<SenderProfile>("/sender");
-      setProfile(data);
-      setName(data.name);
-      setCurrentTitle(data.current_title ?? "");
-      setCurrentCompany(data.current_company ?? "");
-      const loaded = {} as Record<ListFieldKey, string[]>;
-      for (const { key } of LIST_FIELDS) {
-        loaded[key] = data[key] ?? [];
-      }
-      setLists(loaded);
-    } catch {
-      // 404 — no profile yet.
-      setProfile(null);
-    }
-    setLoading(false);
-  }
+  const saveMutation = useMutation({
+    mutationFn: (values: SenderFormValues) =>
+      api.post<SenderProfile>("/sender", {
+        name: values.name,
+        current_title: values.current_title || null,
+        current_company: values.current_company || null,
+        education: cleanList(values.education),
+        past_employers: cleanList(values.past_employers),
+        cities_lived: cleanList(values.cities_lived),
+        hobbies_and_interests: cleanList(values.hobbies_and_interests),
+        investors: cleanList(values.investors),
+        languages_spoken: cleanList(values.languages_spoken),
+        conferences_attended: cleanList(values.conferences_attended),
+      }),
+    onSuccess: async (profile) => {
+      form.reset(profileToForm(profile));
+      await queryClient.invalidateQueries({ queryKey: ["sender-profile"] });
+    },
+  });
 
-   
-  useEffect(() => { loadProfile(); }, []);
+  useEffect(() => {
+    if (!profileQuery.isSuccess || form.formState.isDirty) return;
+    form.reset(profileToForm(profileQuery.data));
+  }, [form, form.formState.isDirty, profileQuery.data, profileQuery.isSuccess]);
 
-  async function handleSave() {
-    if (!name.trim()) return;
-    setSaving(true);
-    try {
-      // Filter out empty strings from list fields.
-      const cleanLists = Object.fromEntries(
-        Object.entries(lists).map(([k, arr]) => [
-          k,
-          arr.filter((v) => v.trim()),
-        ]),
-      );
-
-      const payload = {
-        name,
-        current_title: currentTitle || null,
-        current_company: currentCompany || null,
-        ...cleanLists,
-      };
-
-      await api.post<SenderProfile>("/sender", payload);
-      await loadProfile();
-    } catch (err) {
-      console.error("Failed to save sender profile:", err);
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  if (loading) {
+  if (profileQuery.isLoading) {
     return (
       <div>
-        <h2 className="text-2xl font-bold tracking-tight">
-          Sender Profile
-        </h2>
+        <h2 className="text-2xl font-bold tracking-tight">Sender Profile</h2>
         <p className="mt-2 text-muted-foreground">Loading...</p>
       </div>
     );
   }
 
+  const profile = profileQuery.data;
+
   return (
-    <div className="space-y-6">
+    <form onSubmit={form.handleSubmit((values) => saveMutation.mutate(values))} className="space-y-6">
       <div className="flex items-center justify-between">
         <div>
-          <h2 className="text-2xl font-bold tracking-tight">
-            Sender Profile
-          </h2>
+          <h2 className="text-2xl font-bold tracking-tight">Sender Profile</h2>
           <p className="text-muted-foreground">
             Your background powers the commonality engine.
           </p>
         </div>
         {profile && (
           <Badge variant="secondary">
-            Last updated:{" "}
-            {new Date(profile.updated_at).toLocaleDateString()}
+            Last updated: {new Date(profile.updated_at).toLocaleDateString()}
           </Badge>
         )}
       </div>
@@ -229,76 +220,59 @@ export default function SenderPage() {
         <CardHeader>
           <CardTitle>Your Details</CardTitle>
           <CardDescription>
-            Fill in your background. The commonality matcher will use
-            these to find shared connections with prospects.
+            Complete profiles produce stronger personalization because the commonality matcher has more credible hooks.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-6">
-          {/* Identity */}
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
             <div className="space-y-1.5">
               <Label htmlFor="sender-name">Name *</Label>
-              <Input
-                id="sender-name"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="Your full name"
-              />
+              <Input id="sender-name" {...form.register("name")} placeholder="Your full name" />
+              {form.formState.errors.name && (
+                <p className="text-xs text-destructive">{form.formState.errors.name.message}</p>
+              )}
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="sender-title">Current Title</Label>
-              <Input
-                id="sender-title"
-                value={currentTitle}
-                onChange={(e) => setCurrentTitle(e.target.value)}
-                placeholder="e.g. CEO"
-              />
+              <Input id="sender-title" {...form.register("current_title")} placeholder="CEO" />
             </div>
             <div className="space-y-1.5">
-              <Label htmlFor="sender-company">
-                Current Company
-              </Label>
-              <Input
-                id="sender-company"
-                value={currentCompany}
-                onChange={(e) => setCurrentCompany(e.target.value)}
-                placeholder="e.g. Acme Inc"
-              />
+              <Label htmlFor="sender-company">Current Company</Label>
+              <Input id="sender-company" {...form.register("current_company")} placeholder="Acme Inc" />
             </div>
           </div>
 
           <Separator />
 
-          {/* Dynamic array fields */}
           <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
-            {LIST_FIELDS.map(({ key, label }) => (
-              <ArrayField
-                key={key}
-                label={label}
-                values={lists[key]}
-                onChange={(v) =>
-                  setLists((prev) => ({ ...prev, [key]: v }))
-                }
-              />
-            ))}
+            {listFields.map(({ key, label }) => {
+              const values = watchedValues[key] ?? [];
+              return (
+                <ArrayField
+                  key={key}
+                  label={label}
+                  values={values}
+                  onChange={(next) => form.setValue(key, next, { shouldDirty: true })}
+                />
+              );
+            })}
           </div>
+
+          <Card className="border-dashed bg-muted/30">
+            <CardContent className="p-4 text-sm text-muted-foreground">
+              Preview scaffold: Phase 4 will show a sample commonality analysis against a mock lead here.
+            </CardContent>
+          </Card>
 
           <Separator />
 
           <div className="flex justify-end">
-            <Button
-              onClick={handleSave}
-              disabled={!name.trim() || saving}
-            >
-              {saving
-                ? "Saving..."
-                : profile
-                  ? "Update Profile"
-                  : "Create Profile"}
+            <Button type="submit" disabled={saveMutation.isPending || !(watchedValues.name ?? "").trim()}>
+              {saveMutation.isPending ? "Saving..." : profile ? "Update Profile" : "Create Profile"}
             </Button>
           </div>
         </CardContent>
       </Card>
-    </div>
+    </form>
   );
 }

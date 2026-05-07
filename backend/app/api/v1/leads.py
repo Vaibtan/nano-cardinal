@@ -17,15 +17,16 @@ from fastapi import (
     status,
 )
 from pgvector.sqlalchemy import Vector
-from sqlalchemy import bindparam, select
+from sqlalchemy import bindparam, exists, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.database import get_db
-from app.embeddings import VECTOR_DIMENSION, generate_mock_embedding
+from app.embeddings import VECTOR_DIMENSION, generate_embedding
 from app.models.enums import LeadSource
 from app.models.lead import Lead
 from app.models.outreach import OutreachLog
+from app.models.signal import Signal
 from app.schemas.lead import (
     CSVImportResult,
     LeadCreate,
@@ -112,6 +113,7 @@ async def list_leads(
     min_icp_score: float | None = None,
     max_icp_score: float | None = None,
     industry: str | None = None,
+    signal_type: str | None = None,
     offset: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
@@ -133,6 +135,12 @@ async def list_leads(
         stmt = stmt.where(Lead.icp_score <= max_icp_score)
     if industry:
         stmt = stmt.where(Lead.industry == industry)
+    if signal_type:
+        stmt = stmt.where(
+            exists()
+            .where(Signal.lead_id == Lead.id)
+            .where(Signal.signal_type == signal_type),
+        )
 
     stmt = stmt.offset(offset).limit(limit)
     result = await db.execute(stmt)
@@ -146,14 +154,13 @@ async def search_leads(
     db: AsyncSession = Depends(get_db),
 ) -> list[dict]:
     """Semantic search across all leads using pgvector."""
-    if settings.USE_MOCK_ENRICHMENT:
-        query_vec = generate_mock_embedding(q)
-    else:
-        # TODO: Call real embedding API
+    try:
+        query_vec = await generate_embedding(q)
+    except Exception as exc:
         raise HTTPException(
-            status_code=501,
-            detail="Real embedding API not yet implemented",
-        )
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Embedding provider unavailable",
+        ) from exc
 
     return await _cosine_search(db, query_vec, top_k)
 

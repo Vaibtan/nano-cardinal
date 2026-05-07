@@ -11,7 +11,6 @@ from sqlalchemy import (
     String,
     Text,
     Uuid,
-    func,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -36,8 +35,8 @@ class OutreachLog(Base):
     subject: Mapped[str | None] = mapped_column(String)
     body: Mapped[str | None] = mapped_column(Text)
     engagement_action: Mapped[str | None] = mapped_column(String)
-    sent_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(),
+    sent_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
     )
     opened_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
@@ -47,6 +46,15 @@ class OutreachLog(Base):
     )
     draft_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid, ForeignKey("personalization_drafts.id"),
+    )
+    delivery_status: Mapped[str] = mapped_column(
+        String, default="PENDING", server_default="PENDING",
+        nullable=False,
+    )
+    error_code: Mapped[str | None] = mapped_column(String)
+    error_message: Mapped[str | None] = mapped_column(Text)
+    bounced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
     )
 
     lead = relationship("Lead", lazy="selectin")

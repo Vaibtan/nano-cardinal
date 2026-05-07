@@ -6,6 +6,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 _BASE = "/api/v1/leads"
 
@@ -60,8 +62,25 @@ async def test_create_lead(client: AsyncClient) -> None:
     data = resp.json()
     assert data["first_name"] == "John"
     assert data["enrichment_status"] == "PENDING"
+    assert data["last_contacted_at"] is None
     assert data["source"] == "MANUAL"
     assert "id" in data
+
+
+async def test_last_contacted_at_column_exists(
+    _db_session: AsyncSession,
+) -> None:
+    result = await _db_session.execute(
+        text(
+            """
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_name = 'leads'
+              AND column_name = 'last_contacted_at'
+            """,
+        ),
+    )
+    assert result.scalar_one_or_none() == 1
 
 
 async def test_list_leads(

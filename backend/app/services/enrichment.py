@@ -208,13 +208,9 @@ async def step_embedding_generation(
     text = build_embedding_text(lead, enriched)
     enriched["_embedding_text"] = text
 
-    # Generate embedding (mock: deterministic hash-based vector)
-    if settings.USE_MOCK_ENRICHMENT:
-        from app.embeddings import generate_mock_embedding
+    from app.embeddings import generate_embedding
 
-        enriched["_embedding"] = generate_mock_embedding(text)
-    else:
-        _require_real_integration("Embedding provider")
+    enriched["_embedding"] = await generate_embedding(text)
 
     return enriched
 

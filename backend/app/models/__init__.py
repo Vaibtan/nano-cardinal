@@ -12,6 +12,7 @@ from app.models.sequence import (
     SequenceStep,
 )
 from app.models.signal import Signal
+from app.models.snippet import WinningSnippet
 
 __all__ = [
     "ICP",
@@ -24,4 +25,5 @@ __all__ = [
     "Sequence",
     "SequenceStep",
     "Signal",
+    "WinningSnippet",
 ]

@@ -61,6 +61,7 @@ class LeadRead(BaseModel):
     icp_id: uuid.UUID | None
     icp_score_breakdown: dict[str, float] | None
     outreach_status: str
+    last_contacted_at: datetime | None
     source: str
     inbound_event_id: uuid.UUID | None
     created_at: datetime
@@ -114,5 +115,9 @@ class OutreachLogRead(BaseModel):
     opened_at: datetime | None
     replied_at: datetime | None
     draft_id: uuid.UUID | None
+    delivery_status: str
+    error_code: str | None
+    error_message: str | None
+    bounced_at: datetime | None
 
     model_config = {"from_attributes": True}

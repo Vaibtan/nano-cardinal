@@ -50,6 +50,8 @@ class InboundEvent(Base):
     processed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True),
     )
+    source_event_id: Mapped[str | None] = mapped_column(String)
+    event_fingerprint: Mapped[str | None] = mapped_column(String)
 
     created_lead = relationship(
         "Lead",
@@ -64,4 +66,16 @@ class InboundEvent(Base):
             received_at.desc(),
         ),
         Index("idx_inbound_events_email", email),
+        Index(
+            "uq_inbound_events_fingerprint",
+            event_fingerprint,
+            unique=True,
+        ),
+        Index(
+            "uq_inbound_source_event_id",
+            source,
+            source_event_id,
+            unique=True,
+            postgresql_where=source_event_id.isnot(None),
+        ),
     )

@@ -2,9 +2,9 @@
 
 \# PRD: Orion — AI Precision Outbound Engine  
 \#\#\# Inspired by Cardinal (YC W26)  
-\*\*Version:\*\* 3.2 (Fixed enum casing, phase sequencing, missing env vars, signal types, streaming architecture)  
+\*\*Version:\*\* 3.6 (Clarifies pause reasons, irreducible inbound events, LinkedIn mock outcomes, signal time semantics, and ICP signal thresholds)  
 \*\*Status:\*\* Ready for Implementation  
-\*\*Stack:\*\* FastAPI · NextJS · PostgreSQL · Redis · Qdrant · LangGraph
+\*\*Stack:\*\* FastAPI · NextJS · PostgreSQL (with pgvector) · Redis · LangGraph
 
 \---
 
@@ -48,13 +48,14 @@ It replaces a 10-tool GTM stack with a single agentic platform.
 │  │Commonal- │  │Sequence  │  │Analytics │  │  Email Infra   │    │  
 │  │ity+Pers. │  │ Manager  │  │ Engine   │  │  (Mock SMTP)   │    │  
 │  └──────────┘  └──────────┘  └──────────┘  └────────────────┘    │  
-└──────────┬───────────────┬─────────────────────┬──────────────────┘  
-           │               │                     │  
-      ┌────▼────┐     ┌────▼────┐           ┌────▼────┐  
-      │Postgres │     │  Redis  │           │  Qdrant │  
-      │(Primary │     │(Queue \+ │           │(Vector  │  
-      │  Store) │     │ Cache)  │           │  Store) │  
-      └─────────┘     └────┬────┘           └─────────┘  
+└──────────┬───────────────┬───────────────────────────────────────┘  
+           │               │  
+      ┌────▼────┐     ┌────▼────┐  
+      │Postgres │     │  Redis  │  
+      │(Primary │     │(Queue \+ │  
+      │ Store \+ │     │ Cache \+ │  
+      │pgvector)│     │ Pub/Sub)│  
+      └─────────┘     └────┬────┘  
                            │  
                       ┌────▼────┐  
                       │  ARQ    │  
@@ -68,8 +69,7 @@ It replaces a 10-tool GTM stack with a single agentic platform.
 | ----- | ----- |
 | **FastAPI** | REST API, SSE streams, webhook receivers, agent orchestration entrypoints |
 | **NextJS** | App Router frontend (SSR/CSR hybrid), dashboard pages, form workflows, SSE client |
-| **PostgreSQL** | Leads, ICPs, Sequences, Signals, Inbound Events, Sender Profile, Outreach Logs |
-| **Qdrant** | Vector embeddings of enriched lead profiles \+ winning email snippets for RAG. Two collections: `leads` (semantic search) and `winning_snippets` (RAG for agent Node 3). Vector dimensions and distance metric are determined by `EMBEDDING_MODEL` config (e.g., 768 for text-embedding-004, 1536 for text-embedding-3-small). Distance: Cosine. |
+| **PostgreSQL (with pgvector)** | Primary store for Leads, ICPs, Sequences, Signals, Inbound Events, Sender Profile, Outreach Logs. Also hosts vector embeddings via the `pgvector` extension: `leads.embedding` (semantic search of enriched lead profiles) and `winning_snippets.embedding` (RAG for agent Node 3). Distance: cosine; index: HNSW. The DB column dimension is fixed at schema-creation time (default `768`); the `EMBEDDING_MODEL` config must produce vectors of that dimension. A startup validator (`validate_embedding_dimension`) refuses to boot the API/worker on mismatch. To switch to a model of a different dimension (e.g., `text-embedding-3-small` at 1536), run an Alembic migration that ALTERs the vector columns to the new dimension and re-embeds existing rows. Multi-provider: any provider whose configured model matches the column dimension (e.g., gemini `text-embedding-004` 768, ollama `nomic-embed-text` 768; for 1536-dim columns: openai `text-embedding-3-small`). |
 | **Redis** | ARQ job queue, enrichment result cache, signal dedup hashes |
 | **ARQ Workers** | Background enrichment, signal polling, inbound event processing, sequence execution |
 | **LangGraph** | Multi-step agent: Commonality Matching → Signal Selection → RAG → Draft → Critique → Tone |
@@ -106,6 +106,12 @@ python
     `target_titles: list[str]       # ["VP Sales", "Head of Growth", "CRO"]`  
     `seniority_levels: list[str]    # ["Director", "VP", "C-Suite"]`  
     `departments: list[str]         # ["Sales", "Marketing", "Revenue"]`
+
+    `# Signal preferences used by Phase 3 signal scoring/filtering`
+    `selected_signal_types: list[SignalType]  # Signal types this ICP cares about`
+    `signal_recency_days: int = 30            # ICP-scoped signal queries ignore signals older than this window`
+    `min_signal_strength: float = 0.0         # ICP-scoped feeds/triggers hide signals below this final score`
+    `signal_keywords: list[str] = []          # Optional phrases to boost signal relevance`
 
     `# Scoring weights (0.0 - 1.0, must sum to 1.0)`  
     `weights: dict[str, float]      # {"funding_stage": 0.3, "tech_stack": 0.4, ...}`
@@ -160,6 +166,8 @@ Each lead is scored 0–100 against a selected ICP using a weighted criteria mat
 `GET    /api/v1/tam/heatmap?icp_id={id}    — TAM coverage heatmap data`  
 `GET    /api/v1/tam/whitespace?icp_id={id} — Return cells with lowest coverage_pct`
 
+**Implementation note:** the current API stores ICP filters inside `icps.config` JSONB. The frontend wizard must expose the same logical sections in this order: Firmographics -> Persona -> Signals -> Weighting. `name` and `description` are metadata fields, not a wizard step. Weight controls auto-normalize in the UI so the displayed total is 1.0; the backend scorer still divides by total weight defensively.
+
 ## **Module 2: Inbound Capture Engine \[NEW\]**
 
 **Purpose:** Ingest push events from external systems (product signups, ad impressions,  
@@ -199,6 +207,8 @@ python
     `processed: bool                # Has this been turned into a Lead?`  
     `processing_error: Optional[str]`  
     `created_lead_id: Optional[UUID]  # FK to leads table after processing`
+    `source_event_id: Optional[str]   # Stable upstream ID when source provides one`
+    `event_fingerprint: Optional[str] # SHA256(source + event_type + source-specific fingerprint keys), NULL if no stable keys exist`
 
     `received_at: datetime`  
     `processed_at: Optional[datetime]`
@@ -211,12 +221,13 @@ text
     `▼`  
 `[Step 1] Store Raw Event`  
     `INSERT into inbound_events with processed=false`  
+    `Set source_event_id and/or event_fingerprint only when stable source keys are available`  
     `Return HTTP 200 immediately (async processing)`  
     `│`  
     `▼`  
 `[Step 2] Identity Extraction Worker (ARQ)`  
     `Parse email/linkedin_url from raw_payload based on source schema`  
-    `If no identifiable fields found → mark processing_error, skip`  
+    `If no identifiable fields and no stable idempotency key exist → processed=true, processing_error='no_stable_identity', skip lead creation`  
     `│`  
     `▼`  
 `[Step 3] Deduplication Check`  
@@ -245,6 +256,27 @@ text
     `│`  
     `▼`  
 `Mark InboundEvent processed=true, processed_at=now()`
+
+**Retry/idempotency contract for `POST /api/v1/inbound/events/{id}/retry`:**
+
+* `Retry first loads the existing InboundEvent row and never creates a second InboundEvent.`
+* `If created_lead_id is already set, retry reuses that lead and continues from enrichment/auto-routing.`
+* `If created_lead_id is null, retry deduplicates by email, linkedin_url, company_domain + name, then event_fingerprint when non-null.`
+* `For payloads without stable source_event_id or event_fingerprint, keep the raw audit row with event_fingerprint=NULL, set processed=true, set processing_error='no_stable_identity', and do not create a lead.`
+* `Retry is safe after partial failure: lead creation, lead linking, enrichment enqueue, and processed=true updates are each written so reruns can resume without double-creating leads.`
+* `Webhook inserts must be race-safe: source_event_id is protected by a partial unique index on (source, source_event_id) WHERE source_event_id IS NOT NULL; event_fingerprint is globally unique when non-null as the fallback idempotency key.`
+
+**Inbound event fingerprint contract:**
+
+| Source | `source_event_id` | `event_fingerprint` key material |
+| ----- | ----- | ----- |
+| `clerk` | `data.id` when present | `source + event_type + data.id` |
+| `stripe` | top-level `id` when present | `source + event_type + data.object.id` |
+| `linkedin_ads` | `leadGenFormResponse.id` when present | `source + event_type + leadGenFormResponse.formId + normalized_email` |
+| `google_ads` | `lead.id` or `gclid` when present | `source + event_type + conversion_action + gclid_or_normalized_email` |
+| `manual` | Optional caller-provided `source_event_id` | `source + event_type + normalized_email_or_linkedin_url_or_company_domain` |
+
+**Fingerprint rules:** use only stable identity keys, never volatile timestamps such as `received_at`, `submitted_at`, `created`, or local ingestion time. Normalize emails/domains to lowercase and trim whitespace before hashing. Never compute weak fallback hashes such as `SHA256(source + event_type)`; irreducible events must use `event_fingerprint=NULL` plus `processing_error='no_stable_identity'`.
 
 ## **3.2.4 Source Payload Schemas (Fixtures for local dev)**
 
@@ -341,14 +373,15 @@ python
     `icp_id: Optional[UUID]`  
     `icp_score_breakdown: Optional[dict[str, float]]`
 
-    `# Embedding`  
-    `embedding_id: Optional[str]          # Qdrant point ID`
+    `# Embedding (pgvector column on leads.embedding; ORM exposes it as a list[float])`  
+    `embedding: Optional[list[float]]     # VECTOR(VECTOR_DIMENSION); NULL until Step 5 runs`
 
     `# Signals`  
     `recent_signals: list[UUID]         # Derived field (not persisted column)`
 
     `# Outreach`
     `outreach_status: OutreachStatus`
+    `last_contacted_at: Optional[datetime] # Updated after successful outbound send/engagement`
 
     `# Source tracking`
     `source: LeadSource`
@@ -362,7 +395,7 @@ python
 `The lead.outreach_status field transitions as follows:`
   `UNTOUCHED → IN_SEQUENCE:  When a LeadSequenceEnrollment is created for the lead`
   `IN_SEQUENCE → REPLIED:    When enrollment.reply_received is set to true`
-  `IN_SEQUENCE → BOUNCED:    When a send attempt returns a bounce (logged in outreach_logs.replied_at=null + error)`
+  `IN_SEQUENCE → BOUNCED:    When a send attempt returns a bounce (logged in outreach_logs.delivery_status='BOUNCED', bounced_at set, error fields populated)`
   `Any status → UNTOUCHED:   Only if all enrollments are deleted/unsubscribed (manual reset)`
 `These transitions are enforced by the sequence enrollment service and the sequence execution worker.`
 
@@ -403,9 +436,12 @@ python
      `They recently {linkedin_activity}. Company raised {funding}`  
      `in {industry}. Education: {education}. GitHub: {repo_summary}"`
 
-    `Generates embedding via OpenAI text-embedding-3-small (or`  
-    `Google text-embedding-004 via Google Gen AI SDK)`  
-    `Upserts into Qdrant collection: "leads"`  
+    `Generates embedding via the configured EMBEDDING_PROVIDER /`  
+    `EMBEDDING_MODEL (gemini text-embedding-004, openai`  
+    `text-embedding-3-small, or ollama nomic-embed-text).`  
+    `Writes the vector to leads.embedding (pgvector column).`  
+    `Dimension must match VECTOR_DIMENSION; mismatch is rejected`  
+    `at startup by validate_embedding_dimension().`  
     `│`  
     `▼`  
 `[Step 6] ICP Scoring`  
@@ -439,7 +475,7 @@ python
                                              `enrichment_status, outreach_status, source)`  
 `GET    /api/v1/leads/{id}                   — Get lead detail with full enrichment data`  
 `POST   /api/v1/leads/{id}/enrich            — Re-trigger enrichment for a single lead`  
-`GET    /api/v1/leads/{id}/similar           — Semantic similarity search in Qdrant (top-5)`  
+`GET    /api/v1/leads/{id}/similar           — Semantic similarity search via pgvector cosine distance on leads.embedding (top-5)`  
 `DELETE /api/v1/leads/{id}                   — Delete lead`  
 `GET    /api/v1/leads/search?q=              — Semantic search across all leads`
 `GET    /api/v1/leads/{id}/outreach         — Outreach history for a lead (from outreach_logs)`
@@ -489,8 +525,11 @@ python
     `signal_strength: float          # 0.0 - 1.0`  
     `signal_hash: str                # SHA256 of (lead_id + signal_type + key_fields) for dedup`  
     `detected_at: datetime`  
+    `expires_at: datetime             # Feed retention cutoff; default detected_at + 90 days`
     `is_read: bool`  
     `triggered_outreach: bool`
+
+**Signal retention policy:** unread signals remain eligible for the feed until `expires_at` (default 90 days after `detected_at`). `is_read=true` hides the signal immediately from the default feed. Hard deletion is out of scope for MVP; old rows can be archived later if analytics volume requires it.
 
 ## **3.4.3 Signal Workers Architecture**
 
@@ -542,14 +581,21 @@ text
 `Modifiers (multiplicative):`  
   `× 1.2  if signal detected within last 48h (recency boost)`  
   `× 1.1  if lead icp_score > 80`  
-  `× 0.8  if lead was contacted in last 30 days (cool-off penalty)`  
+  `× 0.8  if lead.last_contacted_at is within last 30 days (cool-off penalty)`  
+  `× 1.05 if signal_title or signal_body matches any icp.signal_keywords entry`  
     
 `Final score capped at 1.0`
+
+**Signal timing and threshold semantics:** `icp.signal_recency_days` filters which signals enter ICP-scoped scoring/feed queries; the 48h recency boost rewards freshness inside the scoring formula; `signals.expires_at` controls default feed visibility and retention. These are independent and should not be collapsed into one field.
+
+**ICP threshold semantics:** after final `signal_strength` is computed and capped, ICP-scoped feeds and auto-personalization triggers exclude signals below `icp.min_signal_strength`. The default `0.0` means no minimum.
+
+**Performance note:** signal scoring must not query `outreach_logs` once per signal to compute the cool-off modifier. Phase 2.5 creates `leads.last_contacted_at` with default `NULL`; Phase 3 signal scoring reads that denormalized field in the lead batch query and treats `NULL` as "never contacted." Phase 5 sequence execution updates it after successful sends and engagement touches.
 
 **API Endpoints:**
 
 text  
-`GET    /api/v1/signals                    — List all signals (paginated, sorted by detected_at)`  
+`GET    /api/v1/signals                    — List visible signals (is_read=false and expires_at>now by default, paginated, sorted by detected_at)`  
 `GET    /api/v1/signals/lead/{lead_id}     — All signals for a specific lead`  
 `POST   /api/v1/signals/poll               — Manually trigger a full signal poll cycle`  
 `PATCH  /api/v1/signals/{id}/read          — Mark signal as read`  
@@ -682,7 +728,7 @@ python
 
 * `Embed: {strongest_hook} + {selected_signal_title} + {lead_title} at {lead_industry} as query vector`
 
-* `Search Qdrant collection winning_snippets (pre-seeded with mock high-performing emails)`
+* `Search winning_snippets table via pgvector cosine distance on winning_snippets.embedding (pre-seeded with mock high-performing emails)`
 
 * `Retrieve top-3 snippets by cosine similarity`
 
@@ -845,6 +891,13 @@ python
 
 **`POST   /api/v1/personalize/{draft_id}/approve      — Approve draft; if linked to sequence enrollment, set enrollment ACTIVE and next_step_at=NOW()`**
 
+**Draft status transition rules:**
+
+* **`DRAFT -> APPROVED`** when a user approves a generated draft.
+* **`APPROVED -> SENT`** after the sequence execution worker successfully writes the outbound `outreach_logs` row for the same `draft_id`.
+* **`DRAFT -> SENT`** is allowed only for no-approval sequence steps where the worker generates and immediately sends the draft.
+* Failed, bounced, or skipped send attempts do not mark a draft `SENT`.
+
 ---
 
 ## **`Module 6: Sequence Manager`**
@@ -865,7 +918,7 @@ python
 
     **`LINKEDIN_CONNECTION  = "LINKEDIN_CONNECTION"`**
 
-    **`LINKEDIN_ENGAGE      = "LINKEDIN_ENGAGE"   # NEW: Like/comment on a post (warm-up)`**
+    **`LINKEDIN_ENGAGE      = "LINKEDIN_ENGAGE"   # Like/comment on a post (warm-up)`**
 
 **`Channel/StepType Validation Rules (enforced at API and worker level):`**
   **`ENGAGEMENT steps → only LINKEDIN_ENGAGE channel`**
@@ -896,6 +949,13 @@ python
 
     **`created_at: datetime`**
 
+**`Sequence is_active behavior:`**
+  **`Setting is_active=false pauses execution for the sequence. The update service moves ACTIVE enrollments for that sequence to PAUSED, sets paused_reason='SEQUENCE_DEACTIVATED', and sets paused_at=NOW().`**
+  **`Setting is_active=true resumes only enrollments with status='PAUSED' AND paused_reason='SEQUENCE_DEACTIVATED', restoring them to ACTIVE without changing next_step_at and clearing paused_reason/paused_at.`**
+  **`User-paused enrollments use paused_reason='USER' and remain PAUSED when a sequence is reactivated.`**
+  **`Terminal enrollments (BOUNCED, REPLIED, UNSUBSCRIBED, COMPLETED) are never resumed by sequence reactivation.`**
+  **`Invariant: paused_reason and paused_at are NULL unless status='PAUSED'; every PAUSED row must have a non-null paused_reason.`**
+
 **`class SequenceStep(BaseModel):`**
 
     **`id: UUID`**
@@ -913,7 +973,7 @@ python
     **`template: Optional[str]        # Static template (merge fields: {{name}}, {{company}})`**
 
     **`use_ai_personalization: bool   # Use LangGraph agent for this step`**
-    **`requires_approval: bool        # NEW: Wait for manual approval of AI draft`**
+    **`requires_approval: bool        # Wait for manual AI draft review`**
 
     **`engagement_action: Optional[str]  # For ENGAGEMENT steps: "like_latest_post" |`**
 
@@ -929,7 +989,11 @@ python
 
     **`current_step: int`**
 
-    **`status: EnrollmentStatus       # ACTIVE | PAUSED | PENDING_APPROVAL | REPLIED | UNSUBSCRIBED | COMPLETED`**
+    **`status: EnrollmentStatus       # ACTIVE | PAUSED | PENDING_APPROVAL | REPLIED | BOUNCED | UNSUBSCRIBED | COMPLETED`**
+
+    **`paused_reason: Optional[PauseReason]  # USER | SEQUENCE_DEACTIVATED; NULL unless status=PAUSED`**
+
+    **`paused_at: Optional[datetime]`**
 
     **`enrolled_at: datetime`**
 
@@ -945,13 +1009,21 @@ python
 
     **`PAUSED           = "PAUSED"`**
     
-    **`PENDING_APPROVAL = "PENDING_APPROVAL"  # NEW: Waiting for manual AI draft review`**
+    **`PENDING_APPROVAL = "PENDING_APPROVAL"  # Waiting for manual AI draft review`**
 
     **`REPLIED          = "REPLIED"`**
+
+    **`BOUNCED          = "BOUNCED"  # Terminal: invalid/unreachable address, never auto-resumed`**
 
     **`UNSUBSCRIBED = "UNSUBSCRIBED"`**
 
     **`COMPLETED    = "COMPLETED"`**
+
+**`class PauseReason(str, Enum):`**
+
+    **`USER                 = "USER"`**
+
+    **`SEQUENCE_DEACTIVATED = "SEQUENCE_DEACTIVATED"`**
 
 ## **`3.6.2 Sequence Execution Worker`**
 
@@ -970,9 +1042,9 @@ python
 
   **`2a. If step_type = ENGAGEMENT (warm-up):`**
 
-        **`Log engagement action to outreach_logs (mock)`**
+        **`Log engagement action to outreach_logs with step_type='ENGAGEMENT', channel='LINKEDIN_ENGAGE', engagement_action=<value>, delivery_status='ENGAGED'`**
 
-        **`No message sent`**
+        **`No message sent; lead.last_contacted_at=NOW() because this is still an intentional outbound touch`**
 
         
 
@@ -999,8 +1071,42 @@ python
 
           **`LINKEDIN_*      → Mock API call (log to outreach_logs)`**
 
+        **`Mock outcomes are deterministic by default:`**
+          **`MOCK_SMTP_MODE=deterministic`**
+          **`MOCK_SMTP_BOUNCE_DOMAINS=bounce.test,invalid.test`**
+          **`MOCK_SMTP_REPLY_DOMAINS=reply.test`**
+          **`EMAIL uses MOCK_SMTP_* rules: bounce domains return BOUNCED, reply domains return REPLIED, all other recipients return SENT.`**
+          **`LINKEDIN_MESSAGE and LINKEDIN_CONNECTION always return SENT in mock mode; only EMAIL can produce deterministic BOUNCED/REPLIED outcomes.`**
+          **`LINKEDIN_ENGAGE always returns ENGAGED in mock mode and follows the engagement logging rule above.`**
+          **`Optional MOCK_SMTP_MODE=seeded_random may use MOCK_SMTP_BOUNCE_RATE, MOCK_SMTP_REPLY_RATE, and MOCK_SMTP_RANDOM_SEED, but tests and demos must use deterministic or seeded outcomes only.`**
+
 
   **`3. Record OutreachLog entry with all metadata`**
+      **`delivery_status starts as PENDING only inside the worker transaction; worker must set final status before commit`**
+
+      **`SENT outcome:`**
+        **`outreach_logs.delivery_status='SENT'`**
+        **`outreach_logs.sent_at=NOW()`**
+        **`draft.status='SENT' if draft_id exists`**
+        **`lead.last_contacted_at=NOW()`**
+
+      **`BOUNCED outcome:`**
+        **`outreach_logs.delivery_status='BOUNCED', bounced_at=NOW(), error_code/error_message populated`**
+        **`lead.outreach_status='BOUNCED'`**
+        **`enrollment.status='BOUNCED'`**
+        **`do not advance to the next step`**
+
+      **`ENGAGED outcome:`**
+        **`outreach_logs.delivery_status='ENGAGED', engagement_action populated`**
+        **`outreach_logs.sent_at=NOW()`**
+        **`lead.last_contacted_at=NOW()`**
+
+      **`REPLIED outcome:`**
+        **`outreach_logs.delivery_status='REPLIED', replied_at=NOW()`**
+        **`outreach_logs.sent_at=NOW()`**
+        **`lead.outreach_status='REPLIED'`**
+        **`enrollment.status='REPLIED', reply_received=true`**
+        **`do not advance to the next step`**
 
 
   **`4. Advance enrollment:`**
@@ -1184,6 +1290,8 @@ python
 
 * **`Forms: React Hook Form + Zod`**
 
+**Phase 2.5 frontend alignment requirement:** before starting Phase 3, install and adopt the frontend libraries above for the pages that will carry real-time and form-heavy workflows. Use TanStack Query for server state, React Hook Form + Zod for `/icp` and `/sender`, Recharts for TAM/analytics/quality charts, and a typed EventSource helper for SSE. Zustand is reserved for cross-page UI/session state that is not already handled by URL params or TanStack Query cache.
+
 ## **`4.2 Pages & Views`**
 
 ## **`Page 1: Dashboard (/)`**
@@ -1234,6 +1342,8 @@ python
 
 * **`Click a grey cell → triggers "Discover Leads" action: YC scraper or mock import filtered to that cell's criteria`**
 
+* **`If the backing data source is not implemented yet, clicking a grey cell opens a Discover Leads action panel with the selected industry/company-size criteria prefilled and a disabled/explained real-source action plus an enabled mock import action.`**
+
 * **`Summary bar at top: Total TAM: 4,200 | Captured: 247 (5.9%) | In Sequence: 142 (3.4%)`**
 
 ## **`Page 3: Sender Profile (/sender) [NEW]`**
@@ -1249,6 +1359,8 @@ python
 ## **`Page 4: ICP Builder (/icp)`**
 
 * **`Multi-step wizard: Firmographic → Persona → Signals → Weighting`**
+
+* **`Signals step captures selected signal types, signal recency window, minimum signal strength, and optional relevance keywords. These values are stored in icps.config and used by Phase 3 signal scoring/filtering.`**
 
 * **`Live preview of matching lead count as criteria are configured`**
 
@@ -1271,6 +1383,8 @@ python
   * **`All generated drafts with critique scores`**
 
   * **`Current sequence enrollment + step position`**
+
+  * **`For P3/P4/P5-only sections with no data yet, render stable empty states instead of omitting the section. This keeps the drawer layout ready for signals, commonalities, drafts, and sequence position as those modules land.`**
 
 * **`Bulk actions: Enrich selected, Enroll in sequence, Export CSV, Delete`**
 
@@ -1372,6 +1486,8 @@ python
 
 **`Client subscribes to GET /api/v1/events/stream (text/event-stream):`**
 
+**SSE contract source of truth:** backend Pydantic schemas own the event union in `backend/app/schemas/events.py`. The frontend imports generated or mirrored types from `frontend/src/lib/events/types.ts`; Phase 3 contract tests must assert every emitted event name and payload shape matches that union. Do not add ad-hoc event names in workers or UI code.
+
 **`typescript`**
 
 **`type SSEEvent =`**
@@ -1421,6 +1537,8 @@ python
 ***`-- ============================================================`***
 
 **`CREATE EXTENSION IF NOT EXISTS "pgcrypto";`**
+
+**`CREATE EXTENSION IF NOT EXISTS "vector";   -- pgvector for semantic search & RAG`**
 
 ***`-- ICPs`***
 
@@ -1532,7 +1650,9 @@ python
 
     **`outreach_status VARCHAR DEFAULT 'UNTOUCHED',`**
 
-    **`embedding_id VARCHAR,`**
+    **`last_contacted_at TIMESTAMPTZ,  -- Denormalized for signal cool-off scoring`**
+
+    **`embedding VECTOR(768),           -- pgvector; dimension fixed at schema-create time, must match EMBEDDING_MODEL`**
 
     **`source VARCHAR DEFAULT 'MANUAL',`**
 
@@ -1563,6 +1683,10 @@ python
     **`linkedin_url VARCHAR,`**
 
     **`company_domain VARCHAR,`**
+
+    **`source_event_id VARCHAR,          -- Stable upstream event ID when available; unique per source when non-null`**
+
+    **`event_fingerprint VARCHAR UNIQUE, -- Nullable; SHA256(source + event_type + source-specific fingerprint keys) when stable keys exist`**
 
     **`raw_payload JSONB NOT NULL,`**
 
@@ -1610,7 +1734,9 @@ python
 
     **`triggered_outreach BOOLEAN DEFAULT false,`**
 
-    **`detected_at TIMESTAMPTZ DEFAULT NOW()`**
+    **`detected_at TIMESTAMPTZ DEFAULT NOW(),`**
+
+    **`expires_at TIMESTAMPTZ NOT NULL DEFAULT (NOW() + INTERVAL '90 days')`**
 
 **`);`**
 
@@ -1720,7 +1846,11 @@ python
 
     **`current_step INT DEFAULT 1,`**
 
-    **`status VARCHAR DEFAULT 'ACTIVE',`**
+    **`status VARCHAR DEFAULT 'ACTIVE', -- ACTIVE | PAUSED | PENDING_APPROVAL | REPLIED | BOUNCED | UNSUBSCRIBED | COMPLETED`**
+
+    **`paused_reason VARCHAR, -- USER | SEQUENCE_DEACTIVATED; NULL unless status='PAUSED'`**
+
+    **`paused_at TIMESTAMPTZ,`**
 
     **`next_step_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),`**
 
@@ -1773,13 +1903,45 @@ python
 
     **`engagement_action VARCHAR,`**
 
-    **`sent_at TIMESTAMPTZ DEFAULT NOW(),`**
+    **`delivery_status VARCHAR DEFAULT 'PENDING', -- PENDING | SENT | BOUNCED | REPLIED | FAILED | ENGAGED`**
+
+    **`error_code VARCHAR,`**
+
+    **`error_message TEXT,`**
+
+    **`sent_at TIMESTAMPTZ, -- Set only after final SENT/ENGAGED/REPLIED outcome is known`**
 
     **`opened_at TIMESTAMPTZ,`**
 
     **`replied_at TIMESTAMPTZ,`**
 
+    **`bounced_at TIMESTAMPTZ,`**
+
     **`draft_id UUID REFERENCES personalization_drafts(id)`**
+
+**`);`**
+
+***`-- Winning Snippets (RAG corpus for agent Node 3 — populated by Phase 4 seed script)`***
+
+**`CREATE TABLE winning_snippets (`**
+
+    **`id UUID PRIMARY KEY DEFAULT gen_random_uuid(),`**
+
+    **`subject_line VARCHAR,`**
+
+    **`body TEXT NOT NULL,`**
+
+    **`hook_type VARCHAR,                -- 'commonality' | 'signal' | 'observation'`**
+
+    **`industry VARCHAR,                 -- denormalised filter for retrieval`**
+
+    **`role_seniority VARCHAR,           -- e.g. 'C-Suite', 'IC'`**
+
+    **`reply_rate FLOAT,                 -- mock metric used for RAG ranking`**
+
+    **`embedding VECTOR(768) NOT NULL,   -- same dimension as leads.embedding`**
+
+    **`created_at TIMESTAMPTZ DEFAULT NOW()`**
 
 **`);`**
 
@@ -1797,9 +1959,13 @@ python
 
 **`CREATE INDEX idx_leads_outreach_status ON leads(outreach_status);`**
 
+**`CREATE INDEX idx_leads_last_contacted_at ON leads(last_contacted_at DESC);`**
+
 **`CREATE INDEX idx_signals_lead_id ON signals(lead_id);`**
 
 **`CREATE INDEX idx_signals_detected_at ON signals(detected_at DESC);`**
+
+**`CREATE INDEX idx_signals_expires_at ON signals(expires_at);`**
 
 **`CREATE INDEX idx_signals_type ON signals(signal_type);`**
 
@@ -1811,9 +1977,15 @@ python
 
 **`CREATE INDEX idx_inbound_events_email ON inbound_events(email);`**
 
+**`CREATE UNIQUE INDEX uq_inbound_source_event_id ON inbound_events(source, source_event_id) WHERE source_event_id IS NOT NULL;`**
+
 **`CREATE INDEX idx_enrollments_next_step ON lead_sequence_enrollments(next_step_at)`**
 
     **`WHERE status = 'ACTIVE';`**
+
+**`CREATE INDEX idx_enrollments_paused_reason ON lead_sequence_enrollments(sequence_id, paused_reason)`**
+
+    **`WHERE status = 'PAUSED';`**
 
 **`CREATE INDEX idx_drafts_lead_id ON personalization_drafts(lead_id);`**
 
@@ -1822,6 +1994,14 @@ python
 **`CREATE INDEX idx_outreach_logs_lead ON outreach_logs(lead_id);`**
 
 **`CREATE INDEX idx_leads_updated_at ON leads(updated_at DESC);`**
+
+***`-- pgvector HNSW indexes for cosine-distance similarity (added in migration 002)`***
+
+**`CREATE INDEX idx_leads_embedding_hnsw ON leads`**
+**`    USING hnsw (embedding vector_cosine_ops);`**
+
+**`CREATE INDEX idx_winning_snippets_embedding_hnsw ON winning_snippets`**
+**`    USING hnsw (embedding vector_cosine_ops);`**
 
 ---
 
@@ -1857,7 +2037,7 @@ python
 
 **`│   │   ├── redis.py                       # Redis client (arq + cache)`**
 
-**`│   │   ├── qdrant.py                      # Qdrant client + collection init`**
+**`│   │   ├── embeddings.py                  # Vector dim constants + dimension validator + provider clients`**
 
 **`│   │   │`**
 
@@ -1987,7 +2167,7 @@ python
 
 **`│   │           ├── crunchbase_sample.json`**
 
-**`│   │           ├── winning_snippets.json   # Pre-seed data for RAG Qdrant collection`**
+**`│   │           ├── winning_snippets.json   # Pre-seed data for RAG (loaded into winning_snippets pgvector table)`**
 
 **`│   │           └── inbound_payloads/`**
 
@@ -2091,7 +2271,7 @@ python
 
   **`postgres:`**
 
-    **`image: postgres:16`**
+    **`image: pgvector/pgvector:pg16        # bundles the pgvector extension`**
 
     **`environment:`**
 
@@ -2111,6 +2291,14 @@ python
 
       **`- "5432:5432"`**
 
+    **`healthcheck:`**
+
+      **`test: ["CMD-SHELL", "pg_isready -U orion -d orion"]`**
+
+      **`interval: 5s`**
+
+      **`retries: 10`**
+
   **`redis:`**
 
     **`image: redis:7-alpine`**
@@ -2119,17 +2307,13 @@ python
 
       **`- "6379:6379"`**
 
-  **`qdrant:`**
+    **`healthcheck:`**
 
-    **`image: qdrant/qdrant:latest`**
+      **`test: ["CMD", "redis-cli", "ping"]`**
 
-    **`ports:`**
+      **`interval: 5s`**
 
-      **`- "6333:6333"`**
-
-    **`volumes:`**
-
-      **`- qdrant_data:/qdrant/storage`**
+      **`retries: 10`**
 
   **`backend:`**
 
@@ -2147,8 +2331,6 @@ python
 
       **`REDIS_URL: redis://redis:6379`**
 
-      **`QDRANT_URL: http://qdrant:6333`**
-
       **`OPENAI_API_KEY: ${OPENAI_API_KEY}`**
 
       **`GEMINI_API_KEY: ${GEMINI_API_KEY}`**
@@ -2185,11 +2367,13 @@ python
 
     **`depends_on:`**
 
-      **`- postgres`**
+      **`postgres:`**
 
-      **`- redis`**
+        **`condition: service_healthy`**
 
-      **`- qdrant`**
+      **`redis:`**
+
+        **`condition: service_healthy`**
 
     **`volumes:`**
 
@@ -2207,8 +2391,6 @@ python
 
       **`REDIS_URL: redis://redis:6379`**
 
-      **`QDRANT_URL: http://qdrant:6333`**
-
       **`OPENAI_API_KEY: ${OPENAI_API_KEY}`**
 
       **`GEMINI_API_KEY: ${GEMINI_API_KEY}`**
@@ -2245,11 +2427,13 @@ python
 
     **`depends_on:`**
 
-      **`- postgres`**
+      **`postgres:`**
 
-      **`- redis`**
+        **`condition: service_healthy`**
 
-      **`- qdrant`**
+      **`redis:`**
+
+        **`condition: service_healthy`**
 
     **`volumes:`**
 
@@ -2277,8 +2461,6 @@ python
 
   **`postgres_data:`**
 
-  **`qdrant_data:`**
-
 ---
 
 ## **`8. Environment Variables`**
@@ -2301,7 +2483,16 @@ python
 
 **`EMBEDDING_PROVIDER=gemini          # gemini | openai | ollama (can differ from LLM_PROVIDER)`**
 
-**`EMBEDDING_MODEL=text-embedding-004  # e.g. text-embedding-004 | text-embedding-3-small | nomic-embed-text`**
+**`EMBEDDING_MODEL=text-embedding-004  # MUST match the dimension of the leads.embedding / winning_snippets.embedding pgvector columns.`**
+**`                                    # Known mappings (see app/embeddings.py:EMBEDDING_DIMS):`**
+**`                                    #   text-embedding-004      → 768   (gemini)   ✓ default`**
+**`                                    #   nomic-embed-text        → 768   (ollama)   ✓ swap-in compatible`**
+**`                                    #   text-embedding-3-small  → 1536  (openai)   ✗ requires column ALTER + reindex`**
+**`                                    #   text-embedding-3-large  → 3072  (openai)   ✗ requires column ALTER + reindex`**
+**`                                    # The FastAPI app and ARQ worker call validate_embedding_dimension()`**
+**`                                    # at startup and refuse to boot on mismatch (no silent corruption).`**
+
+**Embedding-dimension migration runbook:** stop API and workers; create an Alembic migration that drops dependent HNSW indexes, alters `leads.embedding` and `winning_snippets.embedding` to the new `VECTOR(N)` dimension, and recreates the indexes with the same cosine operator class; update `EMBEDDING_MODEL` and `VECTOR_DIMENSION`; re-embed existing lead profiles and winning snippets; run the startup validator and semantic-search tests; restart API and workers only after validation passes.
 
 ***`# ── Enrichment APIs (all optional — mocked if not set) ───────`***
 
@@ -2321,6 +2512,20 @@ python
 
 **`ENABLE_INBOUND_WEBHOOKS=true   # Toggle inbound capture module`**
 
+***`# ── Mock SMTP / Demo Outcomes ───────────────────────────────`***
+
+**`MOCK_SMTP_MODE=deterministic        # deterministic | seeded_random`**
+
+**`MOCK_SMTP_BOUNCE_DOMAINS=bounce.test,invalid.test`**
+
+**`MOCK_SMTP_REPLY_DOMAINS=reply.test`**
+
+**`MOCK_SMTP_BOUNCE_RATE=0.0           # Used only in seeded_random mode`**
+
+**`MOCK_SMTP_REPLY_RATE=0.0            # Used only in seeded_random mode`**
+
+**`MOCK_SMTP_RANDOM_SEED=42            # Stable seed for repeatable demos/tests`**
+
 ***`# ── Thresholds ───────────────────────────────────────────────`***
 
 **`AUTO_PERSONALIZE_THRESHOLD=0.75   # signal_strength ≥ this → auto-generate draft`**
@@ -2335,7 +2540,7 @@ python
 
 ## **`Phase 1 — Core Data Layer + Sender Profile (Week 1)`**
 
-* **`Docker Compose setup (Postgres, Redis, Qdrant) + health checks`**
+* **`Docker Compose setup (Postgres + pgvector, Redis) + health checks`**
 
 * **`SQLAlchemy async models for all 10 tables`**
 
@@ -2359,7 +2564,7 @@ python
 
 * **`Full enrichment pipeline worker (all 6 steps, mock mode)`**
 
-* **`Qdrant collection initialization + embedding upsert in step 5`**
+* **`pgvector extension enabled + leads.embedding column + HNSW index; embedding upsert in Step 5; startup dimension validator wired into FastAPI lifespan and ARQ worker`**
 
 * **`ICP scoring algorithm service`**
 
@@ -2369,17 +2574,43 @@ python
 
 * **`TAM Explorer UI with Recharts Treemap + Whitespace discovery`**
 
+## **`Phase 2.5 — Frontend + Contract Alignment (Before Phase 3)`**
+
+* **`Install and adopt TanStack Query v5, React Hook Form, Zod, Recharts, and the typed SSE/EventSource helper before building Phase 3 UI.`**
+
+* **`Refactor ICP Builder to PRD order: Firmographics -> Persona -> Signals -> Weighting; name/description stay as metadata, not a wizard step.`**
+
+* **`Add ICP signal preferences to icps.config: selected_signal_types, signal_recency_days, min_signal_strength, signal_keywords.`**
+
+* **`Add leads.last_contacted_at TIMESTAMPTZ + idx_leads_last_contacted_at via migration, ORM model, and schemas before Phase 3; default NULL means "never contacted."`**
+
+* **`Add live matching-lead-count preview for ICP criteria and slider-based weight controls that auto-normalize to 1.0 in the UI.`**
+
+* **`Upgrade Lead Board filters with ICP score range and signal type. Scaffold drawer sections for enriched profile, signal timeline, commonality hooks, drafts, and sequence position with empty states until later modules provide data.`**
+
+* **`Make zero/low-coverage TAM cells clickable and open a Discover Leads action using the selected industry/company-size criteria.`**
+
+* **`Update planning docs/checklist so Phase 3 implementation consumes the clarified contracts for signals, SSE, inbound retry, and frontend state management.`**
+
 ## **`Phase 3 — Inbound Capture + Signal Monitor (Week 3)`**
 
 * **`Inbound webhook receiver endpoints (all source parsers)`**
 
-* **`Inbound ARQ worker (identity extraction → lead creation → enrichment trigger)`**
+* **`Inbound ARQ worker (identity extraction → idempotent lead link/create → enrichment trigger)`**
+
+* **`Inbound retry contract: reuse created_lead_id if present, dedup by extracted identity, require source_event_id/event_fingerprint for no-email events, and resume safely after partial failure.`**
+
+* **`Irreducible inbound event handling: if no stable source_event_id or event_fingerprint can be produced, store the audit row with event_fingerprint=NULL, mark processed=true with processing_error='no_stable_identity', and do not create a lead.`**
 
 * **`Inbound-to-signal bridge mappings (PRODUCT_SIGNUP -> PRODUCT_SIGNUP, AD_CLICK/OPT_IN -> WEBSITE_VISIT, CONFERENCE_REGISTRATION -> CONFERENCE_ATTENDANCE)`**
 
 * **`4 Signal ARQ workers (Funding, Hiring, LinkedIn, News) in mock mode`**
 
 * **`Redis signal deduplication (SHA256 hash + TTL)`**
+
+* **`Signal scoring reads leads.last_contacted_at for the cool-off modifier instead of doing per-signal outreach_logs lookups.`**
+
+* **`Signal scoring applies the icp.signal_keywords relevance modifier and filters out expired/read signals from the default feed.`**
 
 * **`SSE event stream endpoint (/api/v1/events/stream) with Redis Pub/Sub bridge for worker → browser streaming`**
 
@@ -2399,9 +2630,9 @@ python
 
 * **`Node 2: Signal Selector`**
 
-* **`Node 3: RAG Fetch (Qdrant query on winning_snippets collection)`**
+* **`Node 3: RAG Fetch (pgvector cosine-distance query on winning_snippets table)`**
 
-* **`Seed winning_snippets Qdrant collection from fixtures JSON`**
+* **`Seed winning_snippets pgvector table from fixtures JSON (embeddings generated with the same EMBEDDING_MODEL the agent will query with — same dimension as leads.embedding)`**
 
 * **`Node 4: Draft Writer (full prompt with negative keywords list)`**
 
@@ -2421,15 +2652,25 @@ python
 
 * **`LINKEDIN_ENGAGE step type support in execution worker`**
 
+* **`LINKEDIN_ENGAGE writes outreach_logs with delivery_status='ENGAGED', engagement_action populated, no message body, and updates lead.last_contacted_at.`**
+
 * **`Sequence execution ARQ cron (every 15 min)`**
 
 * **`Mock SMTP + LinkedIn mock logging`**
+
+* **`Deterministic mock outcomes: EMAIL bounce domains -> BOUNCED, EMAIL reply domains -> REPLIED, other EMAIL recipients -> SENT; LINKEDIN_MESSAGE/LINKEDIN_CONNECTION -> SENT; LINKEDIN_ENGAGE -> ENGAGED.`**
+
+* **`Bounced sends set enrollment.status='BOUNCED' as a terminal state; sequence reactivation never resumes bounced enrollments.`**
 
 * **`Auto-enrollment logic (sequence threshold with global fallback)`**
 
 * **`Activate and test inbound auto-routing (Phase 3 Step 6) end-to-end with real sequences`**
 
-* **`Outreach status transition logic (UNTOUCHED → IN_SEQUENCE on enrollment, → REPLIED on reply)`**
+* **`Outreach status transition logic (UNTOUCHED → IN_SEQUENCE on enrollment, → REPLIED on reply, → BOUNCED on deterministic/mock bounce)`**
+
+* **`Draft SENT transition after successful outreach log write; failed/bounced/skipped sends do not mark drafts SENT.`**
+
+* **`Sequence is_active=false pauses active enrollments with paused_reason='SEQUENCE_DEACTIVATED'; reactivation resumes only those rows and never user-paused or terminal rows.`**
 
 * **`Sequence Builder UI with drag-and-drop step ordering + engagement step config`**
 
@@ -2462,7 +2703,7 @@ python
 | **`Inbound Capture webhook pipeline`** | **`Generic receiver + source-specific payload parsers + async ARQ processing + dedup + auto-routing`** |
 | **`TAM Heatmap aggregation`** | **`Multi-dimensional GROUP BY analytics over lead data; whitespace discovery algorithm`** |
 | **`ARQ async workers with Redis dedup`** | **`Production-grade job queue patterns; idempotent signal processing with SHA256 + TTL`** |
-| **`Qdrant dual-collection usage`** | **`leads collection for semantic search; winning_snippets collection for RAG in agent Node 3`** |
+| **`pgvector dual-purpose usage`** | **`leads.embedding for semantic search; winning_snippets.embedding for RAG in agent Node 3 — both indexed with HNSW (cosine), dimension enforced at startup`** |
 | **`SSE real-time event bus (unified feed)`** | **`Low-latency push architecture merging outbound signals + inbound webhook events without WebSocket overhead`** |
 | **`LangGraph self-critique loop`** | **`Conditional graph edges; multi-dimensional scoring rubric; bounded rewrite iterations`** |
 | **`Full async FastAPI + SQLAlchemy 2.0`** | **`Modern Python async patterns throughout; no sync bottlenecks`** |

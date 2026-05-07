@@ -15,6 +15,7 @@ from sqlalchemy import (
     UniqueConstraint,
     Uuid,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -123,6 +124,10 @@ class LeadSequenceEnrollment(Base):
         Boolean, default=False, server_default="false",
     )
     reply_body: Mapped[str | None] = mapped_column(Text)
+    paused_reason: Mapped[str | None] = mapped_column(String)
+    paused_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+    )
 
     lead = relationship("Lead", lazy="selectin")
     sequence = relationship("Sequence", lazy="selectin")
@@ -135,5 +140,11 @@ class LeadSequenceEnrollment(Base):
         Index(
             "idx_enrollments_next_step",
             next_step_at,
+        ),
+        Index(
+            "idx_enrollments_paused_reason",
+            sequence_id,
+            paused_reason,
+            postgresql_where=text("status = 'PAUSED'"),
         ),
     )

@@ -3,12 +3,20 @@
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import get_db
 from app.models.icp import ICP
-from app.schemas.icp import ICPCreate, ICPRead, ICPUpdate
+from app.models.lead import Lead
+from app.schemas.icp import (
+    ICPCreate,
+    ICPMatchPreviewRequest,
+    ICPMatchPreviewResponse,
+    ICPRead,
+    ICPUpdate,
+)
+from app.services.icp_scorer import parse_size_bucket
 
 router = APIRouter(prefix="/icps", tags=["icps"])
 
@@ -41,6 +49,54 @@ async def list_icps(
         stmt = stmt.where(ICP.is_active.is_(True))
     result = await db.execute(stmt)
     return list(result.scalars().all())
+
+
+@router.post("/match-count", response_model=ICPMatchPreviewResponse)
+async def preview_match_count(
+    body: ICPMatchPreviewRequest,
+    db: AsyncSession = Depends(get_db),
+) -> ICPMatchPreviewResponse:
+    """Return a live count of leads matching an unsaved ICP config."""
+    config = body.config
+    stmt = select(func.count()).select_from(Lead)
+
+    if config.industries:
+        stmt = stmt.where(Lead.industry.in_(config.industries))
+    if config.funding_stages:
+        stmt = stmt.where(Lead.funding_stage.in_(config.funding_stages))
+    if config.titles:
+        stmt = stmt.where(Lead.title.in_(config.titles))
+    if config.seniorities:
+        stmt = stmt.where(Lead.seniority.in_(config.seniorities))
+    if config.departments:
+        stmt = stmt.where(Lead.department.in_(config.departments))
+    if config.company_sizes:
+        size_clauses = []
+        for bucket in config.company_sizes:
+            parsed = parse_size_bucket(bucket)
+            if parsed is None:
+                continue
+            lo, hi = parsed
+            size_clauses.append(
+                (Lead.company_size >= lo) & (Lead.company_size <= hi),
+            )
+        if size_clauses:
+            stmt = stmt.where(or_(*size_clauses))
+    if config.tech_stack:
+        tech_clauses = [
+            Lead.tech_stack.contains([tech])
+            for tech in config.tech_stack
+            if tech
+        ]
+        if tech_clauses:
+            stmt = stmt.where(or_(*tech_clauses))
+
+    matching = await db.scalar(stmt)
+    total = await db.scalar(select(func.count()).select_from(Lead))
+    return ICPMatchPreviewResponse(
+        matching_count=int(matching or 0),
+        total_leads=int(total or 0),
+    )
 
 
 @router.get("/{icp_id}", response_model=ICPRead)

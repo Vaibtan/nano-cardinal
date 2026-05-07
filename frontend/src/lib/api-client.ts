@@ -3,7 +3,7 @@ const API_BASE = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 type RequestOptions = {
   method?: string;
   body?: unknown;
-  params?: Record<string, string>;
+  params?: Record<string, string | number | boolean | null | undefined>;
 };
 
 async function request<T>(
@@ -14,7 +14,13 @@ async function request<T>(
 
   let url = `${API_BASE}/api/v1${path}`;
   if (params) {
-    const qs = new URLSearchParams(params).toString();
+    const entries: [string, string][] = [];
+    for (const [key, value] of Object.entries(params)) {
+      if (value !== undefined && value !== null && value !== "") {
+        entries.push([key, String(value)]);
+      }
+    }
+    const qs = new URLSearchParams(entries).toString();
     url += `?${qs}`;
   }
 
@@ -39,7 +45,10 @@ async function request<T>(
 }
 
 export const api = {
-  get: <T>(path: string, params?: Record<string, string>) =>
+  get: <T>(
+    path: string,
+    params?: Record<string, string | number | boolean | null | undefined>,
+  ) =>
     request<T>(path, { params }),
 
   post: <T>(path: string, body: unknown) =>
