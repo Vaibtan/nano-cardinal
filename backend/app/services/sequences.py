@@ -201,20 +201,91 @@ async def auto_enroll_matching_sequences(
     return enrollments
 
 
-async def execute_due_enrollments(db: AsyncSession) -> int:
-    """Execute due active enrollments once."""
-    now = datetime.now(timezone.utc)
-    result = await db.execute(
-        select(LeadSequenceEnrollment)
-        .where(LeadSequenceEnrollment.status == EnrollmentStatus.ACTIVE.value)
-        .where(LeadSequenceEnrollment.next_step_at <= now)
-        .order_by(LeadSequenceEnrollment.next_step_at)
-        .limit(100),
+async def batch_enroll_by_icp_score(
+    db: AsyncSession,
+    sequence: Sequence,
+    min_icp_score: float,
+    limit: int = 100,
+) -> list[LeadSequenceEnrollment]:
+    """Enroll matching untouched leads above a minimum ICP score."""
+    existing_leads = (
+        select(LeadSequenceEnrollment.lead_id)
+        .where(LeadSequenceEnrollment.sequence_id == sequence.id)
     )
+    stmt = (
+        select(Lead)
+        .where(Lead.icp_score >= min_icp_score)
+        .where(Lead.id.not_in(existing_leads))
+        .order_by(Lead.icp_score.desc().nullslast())
+        .limit(limit)
+    )
+    if sequence.icp_id is not None:
+        stmt = stmt.where(Lead.icp_id == sequence.icp_id)
+    result = await db.execute(stmt)
+    enrollments: list[LeadSequenceEnrollment] = []
+    for lead in result.scalars().all():
+        enrollments.append(await enroll_lead(db, sequence, lead))
+    return enrollments
+
+
+async def pause_enrollment_for_user(
+    db: AsyncSession,
+    enrollment: LeadSequenceEnrollment,
+) -> LeadSequenceEnrollment:
+    """Pause one enrollment because the user explicitly requested it."""
+    if enrollment.status in _TERMINAL_STATUSES:
+        return enrollment
+    enrollment.status = EnrollmentStatus.PAUSED.value
+    enrollment.paused_reason = PausedReason.USER.value
+    enrollment.paused_at = datetime.now(timezone.utc)
+    await db.flush()
+    return enrollment
+
+
+async def resume_user_paused_enrollment(
+    db: AsyncSession,
+    enrollment: LeadSequenceEnrollment,
+) -> LeadSequenceEnrollment:
+    """Resume an enrollment only if it was user-paused."""
+    if (
+        enrollment.status == EnrollmentStatus.PAUSED.value
+        and enrollment.paused_reason == PausedReason.USER.value
+    ):
+        enrollment.status = EnrollmentStatus.ACTIVE.value
+        enrollment.paused_reason = None
+        enrollment.paused_at = None
+        enrollment.next_step_at = datetime.now(timezone.utc)
+    await db.flush()
+    return enrollment
+
+
+async def execute_due_enrollments(
+    db: AsyncSession,
+    batch_size: int = 100,
+    max_batches: int = 10,
+) -> int:
+    """Execute due active enrollments in bounded batches."""
     executed = 0
-    for enrollment in result.scalars().all():
-        if await execute_enrollment_step(db, enrollment):
-            executed += 1
+    for _ in range(max_batches):
+        now = datetime.now(timezone.utc)
+        result = await db.execute(
+            select(LeadSequenceEnrollment)
+            .where(
+                LeadSequenceEnrollment.status
+                == EnrollmentStatus.ACTIVE.value,
+            )
+            .where(LeadSequenceEnrollment.next_step_at <= now)
+            .order_by(LeadSequenceEnrollment.next_step_at)
+            .limit(batch_size),
+        )
+        enrollments = list(result.scalars().all())
+        if not enrollments:
+            break
+        for enrollment in enrollments:
+            if await execute_enrollment_step(db, enrollment):
+                executed += 1
+        if len(enrollments) < batch_size:
+            break
     return executed
 
 

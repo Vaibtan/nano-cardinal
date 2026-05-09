@@ -4,6 +4,16 @@ Orion is an AI-native precision outbound platform. It combines ICP definition,
 lead enrichment, inbound capture, buying-signal monitoring, personalized draft
 generation, sequence execution, and analytics into one local demo stack.
 
+Current implementation status:
+
+- Phase 1 and Phase 2 are implemented.
+- Phase 2.5 through Phase 6 have broad vertical-slice implementations, and
+  the Claude-reported blockers have been patched.
+- The active work currently lives on the `lead-pipeline` branch and has not
+  been merged into `main`.
+- Frontend `npm run lint` and `npm run build` pass.
+- Backend tests pass against Docker Postgres/pgvector + Redis.
+
 ## Architecture
 
 ```text
@@ -38,7 +48,16 @@ Core frontend pages:
 
 ## Local Runbook
 
-Start infrastructure and apps:
+Docker-first path:
+
+```powershell
+docker compose up -d postgres redis
+docker compose run --rm backend alembic upgrade head
+docker compose up -d backend worker frontend
+docker compose exec -T backend python scripts/seed_demo.py
+```
+
+Local development path:
 
 ```powershell
 docker compose up -d postgres redis
@@ -95,6 +114,16 @@ The backend test suite expects a Postgres test database at
 6. Open `/analytics` to verify funnel, signal, inbound, sequence, and draft
    metrics update.
 
+Current demo caveats:
+
+- Signal monitoring is deterministic mock scanning, not real Funding/Hiring/
+  LinkedIn/News source polling.
+- Draft token streaming is worker-published over Redis `sse:{draft_id}` from
+  the stored draft body. It is not real provider-token streaming yet.
+- LangGraph is now the executed deterministic personalization path. The
+  remaining production gap is replacing deterministic nodes with real LLM/tool
+  nodes when provider integrations are wired.
+
 ## Important Mock Semantics
 
 - Non-mock enrichment fails fast until real providers are wired.
@@ -104,3 +133,16 @@ The backend test suite expects a Postgres test database at
   - all other email sends become `SENT`.
 - LinkedIn message/connection steps become `SENT`.
 - LinkedIn engagement steps become `ENGAGED`.
+
+## Known Gaps Before Demo/PR
+
+- Real source-specific signal polling workers are still mocked by the
+  deterministic scanner.
+- Real enrichment providers are intentionally fail-fast until API integrations
+  are implemented.
+- Real LLM/provider-token streaming is not implemented; streaming currently
+  replays persisted draft tokens from an ARQ worker.
+- Sequence UI still needs the per-step metrics overlay.
+- Broader Phase 3-6 edge-case coverage remains useful beyond the targeted
+  regression tests now added.
+- Open and review a PR from `lead-pipeline` into `main`.

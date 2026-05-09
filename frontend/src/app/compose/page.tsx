@@ -3,11 +3,11 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  Radar,
-  RadarChart,
   PolarAngleAxis,
   PolarGrid,
   PolarRadiusAxis,
+  Radar,
+  RadarChart,
   ResponsiveContainer,
 } from "recharts";
 import { CheckCircle2, PenLine, RadioTower } from "lucide-react";
@@ -21,6 +21,8 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/lib/api-client";
 
 type Lead = {
@@ -32,6 +34,14 @@ type Lead = {
   company_domain: string | null;
   title: string | null;
   icp_score: number | null;
+};
+
+type SignalItem = {
+  id: string;
+  lead_id: string;
+  signal_type: string;
+  signal_title: string;
+  signal_strength: number | null;
 };
 
 type Draft = {
@@ -55,12 +65,24 @@ export default function ComposePage() {
   const queryClient = useQueryClient();
   const [isMounted, setIsMounted] = useState(false);
   const [selectedLeadId, setSelectedLeadId] = useState("");
+  const [leadSearch, setLeadSearch] = useState("");
+  const [selectedSignalId, setSelectedSignalId] = useState("");
   const [selectedDraftId, setSelectedDraftId] = useState<string | null>(null);
   const [streamedText, setStreamedText] = useState("");
+  const [isEditing, setIsEditing] = useState(false);
+  const [editSubject, setEditSubject] = useState("");
+  const [editBody, setEditBody] = useState("");
+  const [editLinkedIn, setEditLinkedIn] = useState("");
+  const [notice, setNotice] = useState<string | null>(null);
 
   const leadsQuery = useQuery({
     queryKey: ["leads", "compose"],
     queryFn: () => api.get<Lead[]>("/leads", { limit: 100 }),
+  });
+
+  const signalsQuery = useQuery({
+    queryKey: ["signals", "compose"],
+    queryFn: () => api.get<SignalItem[]>("/signals", { limit: 200 }),
   });
 
   const draftsQuery = useQuery({
@@ -70,9 +92,13 @@ export default function ComposePage() {
 
   const generateMutation = useMutation({
     mutationFn: (leadId: string) =>
-      api.post<Draft>("/personalization/generate", { lead_id: leadId }),
+      api.post<Draft>("/personalization/generate", {
+        lead_id: leadId,
+        signal_id: selectedSignalId || null,
+      }),
     onSuccess: draft => {
       setSelectedDraftId(draft.id);
+      setNotice("Draft generated.");
       void queryClient.invalidateQueries({ queryKey: ["drafts"] });
     },
   });
@@ -82,20 +108,57 @@ export default function ComposePage() {
       api.post<Draft>(`/personalization/drafts/${draftId}/approve`, {}),
     onSuccess: draft => {
       setSelectedDraftId(draft.id);
+      setNotice("Draft approved.");
       void queryClient.invalidateQueries({ queryKey: ["drafts"] });
     },
   });
 
-  const leads = leadsQuery.data ?? [];
+  const patchMutation = useMutation({
+    mutationFn: (draftId: string) =>
+      api.patch<Draft>(`/personalization/drafts/${draftId}`, {
+        subject_line: editSubject,
+        email_body: editBody,
+        linkedin_message: editLinkedIn,
+      }),
+    onSuccess: draft => {
+      setSelectedDraftId(draft.id);
+      setIsEditing(false);
+      setNotice("Draft saved.");
+      void queryClient.invalidateQueries({ queryKey: ["drafts"] });
+    },
+  });
+
+  const leads = (leadsQuery.data ?? []).filter(lead => {
+    const haystack = [
+      lead.company_name,
+      lead.company_domain,
+      lead.email,
+      lead.title,
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    return haystack.includes(leadSearch.toLowerCase());
+  });
   const drafts = draftsQuery.data ?? [];
   const selectedDraft =
     drafts.find(draft => draft.id === selectedDraftId) ?? drafts[0];
   const selectedLead = leads.find(lead => lead.id === selectedLeadId);
+  const leadSignals = (signalsQuery.data ?? []).filter(
+    signal => signal.lead_id === selectedLeadId,
+  );
   const radarData = buildRadarData(selectedDraft);
 
   useEffect(() => {
     setIsMounted(true);
   }, []);
+
+  useEffect(() => {
+    if (!selectedDraft || isEditing) return;
+    setEditSubject(selectedDraft.subject_line ?? "");
+    setEditBody(selectedDraft.email_body ?? "");
+    setEditLinkedIn(selectedDraft.linkedin_message ?? "");
+  }, [selectedDraft, isEditing]);
 
   async function streamDraft(draftId: string): Promise<void> {
     setStreamedText("");
@@ -118,29 +181,41 @@ export default function ComposePage() {
     <div className="space-y-6">
       <div>
         <p className="text-sm font-medium text-muted-foreground">Phase 4</p>
-        <h2 className="text-3xl font-bold tracking-tight">
-          AI Composer
-        </h2>
+        <h2 className="text-3xl font-bold tracking-tight">AI Composer</h2>
         <p className="mt-2 max-w-2xl text-muted-foreground">
-          Deterministic LangGraph-compatible draft generation with
-          commonality hooks, RAG snippets, bounded critique/rewrite, approval,
-          and token streaming.
+          Executable LangGraph draft generation with commonality hooks, RAG
+          snippets, bounded critique/rewrite, approval, and SSE token
+          streaming.
         </p>
       </div>
+
+      {notice && (
+        <div className="rounded-lg border border-primary/30 bg-primary/5 p-3 text-sm">
+          {notice}
+        </div>
+      )}
 
       <div className="grid gap-6 xl:grid-cols-[360px_1fr]">
         <Card>
           <CardHeader>
             <CardTitle>Generate</CardTitle>
             <CardDescription>
-              Pick a lead and create a personalized draft.
+              Pick a lead, optionally pin a signal, then create a draft.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
+            <Input
+              placeholder="Search leads by company, email, or title"
+              value={leadSearch}
+              onChange={event => setLeadSearch(event.target.value)}
+            />
             <select
               className="h-10 w-full rounded-md border bg-background px-3 text-sm"
               value={selectedLeadId}
-              onChange={event => setSelectedLeadId(event.target.value)}
+              onChange={event => {
+                setSelectedLeadId(event.target.value);
+                setSelectedSignalId("");
+              }}
             >
               <option value="">Select a lead</option>
               {leads.map(lead => (
@@ -149,6 +224,19 @@ export default function ComposePage() {
                     lead.company_domain ??
                     lead.email ??
                     lead.id}
+                </option>
+              ))}
+            </select>
+            <select
+              className="h-10 w-full rounded-md border bg-background px-3 text-sm"
+              value={selectedSignalId}
+              onChange={event => setSelectedSignalId(event.target.value)}
+              disabled={!selectedLeadId}
+            >
+              <option value="">Auto-pick strongest signal</option>
+              {leadSignals.map(signal => (
+                <option key={signal.id} value={signal.id}>
+                  {signal.signal_type}: {signal.signal_title}
                 </option>
               ))}
             </select>
@@ -182,7 +270,7 @@ export default function ComposePage() {
               <div>
                 <CardTitle>Draft Workspace</CardTitle>
                 <CardDescription>
-                  Review, approve, and stream the selected draft.
+                  Review, edit, approve, and stream the selected draft.
                 </CardDescription>
               </div>
               {selectedDraft && <Badge>{selectedDraft.status}</Badge>}
@@ -192,22 +280,61 @@ export default function ComposePage() {
                 <div className="space-y-4">
                   <div>
                     <p className="text-sm text-muted-foreground">Subject</p>
-                    <h3 className="text-xl font-semibold">
-                      {selectedDraft.subject_line}
-                    </h3>
+                    {isEditing ? (
+                      <Input
+                        value={editSubject}
+                        onChange={event => setEditSubject(event.target.value)}
+                      />
+                    ) : (
+                      <h3 className="text-xl font-semibold">
+                        {selectedDraft.subject_line}
+                      </h3>
+                    )}
                   </div>
-                  <div className="rounded-xl border bg-background p-4 whitespace-pre-wrap">
-                    {selectedDraft.email_body}
-                  </div>
+                  {isEditing ? (
+                    <Textarea
+                      className="min-h-56"
+                      value={editBody}
+                      onChange={event => setEditBody(event.target.value)}
+                    />
+                  ) : (
+                    <div className="whitespace-pre-wrap rounded-xl border bg-background p-4">
+                      {selectedDraft.email_body}
+                    </div>
+                  )}
                   <div className="rounded-xl border bg-muted/40 p-4">
                     <p className="mb-2 text-sm font-medium">
                       LinkedIn variant
                     </p>
-                    <p className="text-sm text-muted-foreground">
-                      {selectedDraft.linkedin_message}
-                    </p>
+                    {isEditing ? (
+                      <Textarea
+                        value={editLinkedIn}
+                        onChange={event => setEditLinkedIn(event.target.value)}
+                      />
+                    ) : (
+                      <p className="text-sm text-muted-foreground">
+                        {selectedDraft.linkedin_message}
+                      </p>
+                    )}
                   </div>
                   <div className="flex flex-wrap gap-2">
+                    {isEditing ? (
+                      <Button
+                        variant="outline"
+                        disabled={patchMutation.isPending}
+                        onClick={() => patchMutation.mutate(selectedDraft.id)}
+                      >
+                        Save Edits
+                      </Button>
+                    ) : (
+                      <Button
+                        variant="outline"
+                        disabled={selectedDraft.status !== "DRAFT"}
+                        onClick={() => setIsEditing(true)}
+                      >
+                        Edit
+                      </Button>
+                    )}
                     <Button
                       onClick={() => approveMutation.mutate(selectedDraft.id)}
                       disabled={approveMutation.isPending}
@@ -281,7 +408,7 @@ export default function ComposePage() {
                     <RadarChart data={radarData}>
                       <PolarGrid />
                       <PolarAngleAxis dataKey="axis" />
-                      <PolarRadiusAxis domain={[0, 3]} />
+                      <PolarRadiusAxis domain={[0, 10]} />
                       <Radar
                         dataKey="score"
                         fill="var(--primary)"
@@ -328,9 +455,10 @@ export default function ComposePage() {
 function buildRadarData(draft?: Draft) {
   const breakdown = draft?.critique_breakdown ?? {};
   return [
-    { axis: "Length", score: breakdown.length ?? 0 },
-    { axis: "Specific", score: breakdown.specificity ?? 0 },
-    { axis: "Clarity", score: breakdown.clarity ?? 0 },
-    { axis: "Brevity", score: breakdown.brevity ?? 0 },
+    { axis: "Specificity", score: breakdown.specificity ?? 0 },
+    { axis: "Relevance", score: breakdown.relevance ?? 0 },
+    { axis: "Tone", score: breakdown.tone ?? 0 },
+    { axis: "CTA", score: breakdown.cta_clarity ?? 0 },
+    { axis: "Subject", score: breakdown.subject_line ?? 0 },
   ];
 }

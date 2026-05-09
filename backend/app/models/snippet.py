@@ -18,11 +18,14 @@ class WinningSnippet(Base):
         Uuid, primary_key=True, default=uuid.uuid4,
     )
     title: Mapped[str] = mapped_column(String, nullable=False)
+    subject_line: Mapped[str | None] = mapped_column(String)
     body: Mapped[str] = mapped_column(Text, nullable=False)
     industry: Mapped[str | None] = mapped_column(String)
     persona: Mapped[str | None] = mapped_column(String)
+    hook_type: Mapped[str | None] = mapped_column(String)
+    role_seniority: Mapped[str | None] = mapped_column(String)
     channel: Mapped[str | None] = mapped_column(String)
-    win_rate: Mapped[float | None] = mapped_column(Float)
+    reply_rate: Mapped[float | None] = mapped_column(Float)
     embedding = mapped_column(Vector(VECTOR_DIMENSION), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(),

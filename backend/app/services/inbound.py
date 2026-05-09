@@ -282,11 +282,11 @@ def _parse_clerk(
     if not email and addresses:
         email = _string(addresses[0].get("email_address"))
     event_type = _string(payload.get("type")) or InboundEventType.PRODUCT_SIGNUP.value
-    source_event_id = _string(payload.get("id")) or _string(data.get("id"))
+    source_event_id = _string(data.get("id")) or _string(payload.get("id"))
     fingerprint = _fingerprint(
         source,
         InboundEventType.PRODUCT_SIGNUP.value,
-        [data.get("id"), email],
+        [data.get("id")],
     )
     return ParsedInboundEvent(
         source=source,
@@ -319,7 +319,7 @@ def _parse_stripe(
     fingerprint = _fingerprint(
         source,
         event_type,
-        [obj.get("id"), email, metadata.get("company_domain")],
+        [obj.get("id")],
     )
     return ParsedInboundEvent(
         source=source,
@@ -344,7 +344,7 @@ def _parse_linkedin_ads(
     event_type = InboundEventType.WEBSITE_OPT_IN.value
     email = _string(response.get("email"))
     form_id = _string(response.get("formId"))
-    fingerprint = _fingerprint(source, event_type, [email, form_id])
+    fingerprint = _fingerprint(source, event_type, [form_id, email])
     return ParsedInboundEvent(
         source=source,
         event_type=event_type,
@@ -365,14 +365,27 @@ def _parse_google_ads(
     payload: dict[str, Any],
 ) -> ParsedInboundEvent:
     user_data = payload.get("user_data", {})
+    lead = payload.get("lead", {})
     event_type = InboundEventType.AD_CLICK.value
     gclid = _string(payload.get("gclid"))
     email = _string(user_data.get("email")) or _string(payload.get("email"))
-    fingerprint = _fingerprint(source, event_type, [gclid, email])
+    conversion_action = (
+        _string(payload.get("conversion_action"))
+        or _string(payload.get("conversionAction"))
+    )
+    fingerprint = _fingerprint(
+        source,
+        event_type,
+        [conversion_action, gclid or email],
+    )
     return ParsedInboundEvent(
         source=source,
         event_type=event_type,
-        source_event_id=gclid or _string(payload.get("conversion_id")),
+        source_event_id=(
+            _string(lead.get("id")) if isinstance(lead, dict) else None
+        )
+        or gclid
+        or _string(payload.get("conversion_id")),
         event_fingerprint=fingerprint,
         email=email,
         first_name=_string(user_data.get("first_name")),

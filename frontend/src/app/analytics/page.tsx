@@ -66,6 +66,27 @@ type Dashboard = {
   };
 };
 
+type TamSummary = {
+  captured_leads: number;
+  industries: number;
+  average_icp_score: number | null;
+};
+
+type Lead = {
+  id: string;
+  icp_score: number | null;
+};
+
+type Draft = {
+  id: string;
+  critique_score: number | null;
+  token_usage: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+  } | null;
+  created_at: string;
+};
+
 const COLORS = ["#0f766e", "#ea580c", "#2563eb", "#9333ea", "#475569"];
 
 export default function AnalyticsPage() {
@@ -74,14 +95,45 @@ export default function AnalyticsPage() {
     queryKey: ["analytics-dashboard"],
     queryFn: () => api.get<Dashboard>("/analytics/dashboard"),
   });
+  const tamQuery = useQuery({
+    queryKey: ["analytics-tam"],
+    queryFn: () => api.get<TamSummary>("/analytics/tam"),
+  });
+  const leadsQuery = useQuery({
+    queryKey: ["analytics-leads"],
+    queryFn: () => api.get<Lead[]>("/leads", { limit: 200 }),
+  });
+  const draftsQuery = useQuery({
+    queryKey: ["analytics-drafts"],
+    queryFn: () => api.get<Draft[]>("/personalization/drafts"),
+  });
 
   const dashboard = dashboardQuery.data;
+  const tam = tamQuery.data;
+  const leads = leadsQuery.data ?? [];
+  const drafts = draftsQuery.data ?? [];
   const signalData = Object.entries(dashboard?.signals.by_type ?? {}).map(
     ([name, value]) => ({ name, value }),
   );
   const inboundData = Object.entries(dashboard?.inbound.by_source ?? {}).map(
     ([name, value]) => ({ name, value }),
   );
+  const icpHistogram = buildIcpHistogram(leads);
+  const tokenUsage = drafts.reduce(
+    (acc, draft) =>
+      acc +
+      (draft.token_usage?.prompt_tokens ?? 0) +
+      (draft.token_usage?.completion_tokens ?? 0),
+    0,
+  );
+  const estimatedCost = (tokenUsage / 1_000_000) * 1.5;
+  const qualityTrend = drafts
+    .slice(0, 10)
+    .reverse()
+    .map((draft, index) => ({
+      name: `${index + 1}`,
+      score: draft.critique_score ?? 0,
+    }));
 
   useEffect(() => {
     setIsMounted(true);
@@ -118,6 +170,29 @@ export default function AnalyticsPage() {
           icon={<MailCheck className="size-4" />}
           label="Reply Rate"
           value={`${Math.round((dashboard?.overview.reply_rate ?? 0) * 100)}%`}
+        />
+      </div>
+
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <Metric
+          icon={<ChartNoAxesColumn className="size-4" />}
+          label="TAM Captured"
+          value={tam?.captured_leads ?? 0}
+        />
+        <Metric
+          icon={<ChartNoAxesColumn className="size-4" />}
+          label="Industries"
+          value={tam?.industries ?? 0}
+        />
+        <Metric
+          icon={<PenCostIcon />}
+          label="Tokens Used"
+          value={tokenUsage}
+        />
+        <Metric
+          icon={<PenCostIcon />}
+          label="Est. Cost"
+          value={`$${estimatedCost.toFixed(3)}`}
         />
       </div>
 
@@ -251,8 +326,74 @@ export default function AnalyticsPage() {
           </CardContent>
         </Card>
       </div>
+
+      <div className="grid gap-6 xl:grid-cols-2">
+        <Card>
+          <CardHeader>
+            <CardTitle>ICP Score Histogram</CardTitle>
+            <CardDescription>
+              Distribution of account fit across the visible lead pool.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="h-72">
+            {isMounted && (
+              <ResponsiveContainer width="100%" height="100%" minHeight={220}>
+                <BarChart data={icpHistogram}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="bucket" />
+                  <YAxis allowDecimals={false} />
+                  <Tooltip />
+                  <Bar dataKey="count" fill="#2563eb" radius={[8, 8, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            )}
+          </CardContent>
+        </Card>
+
+        <Card>
+          <CardHeader>
+            <CardTitle>Personalization Quality</CardTitle>
+            <CardDescription>
+              Recent critique score trend from generated drafts.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="h-72">
+            {isMounted && (
+              <ResponsiveContainer width="100%" height="100%" minHeight={220}>
+                <BarChart data={qualityTrend}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="name" />
+                  <YAxis domain={[0, 10]} />
+                  <Tooltip />
+                  <Bar dataKey="score" fill="#9333ea" radius={[8, 8, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            )}
+          </CardContent>
+        </Card>
+      </div>
     </div>
   );
+}
+
+function buildIcpHistogram(leads: Lead[]) {
+  const buckets = [
+    { bucket: "0-20", count: 0 },
+    { bucket: "21-40", count: 0 },
+    { bucket: "41-60", count: 0 },
+    { bucket: "61-80", count: 0 },
+    { bucket: "81-100", count: 0 },
+  ];
+  for (const lead of leads) {
+    const score = lead.icp_score ?? 0;
+    const index = Math.min(Math.floor(score / 20), 4);
+    buckets[index].count += 1;
+  }
+  return buckets;
+}
+
+function PenCostIcon() {
+  return <MailCheck className="size-4" />;
 }
 
 function Metric({

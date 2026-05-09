@@ -7,13 +7,17 @@ import json
 import uuid
 from contextlib import suppress
 
+from arq import create_pool
+from arq.connections import RedisSettings
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.database import get_db
 from app.models.draft import PersonalizationDraft
+from app.models.enums import DraftStatus
 from app.models.lead import Lead
 from app.redis import redis_client
 from app.schemas.personalization import (
@@ -21,11 +25,13 @@ from app.schemas.personalization import (
     PersonalizationDraftPatch,
     PersonalizationDraftRead,
     PersonalizationGenerateRequest,
+    PersonalizationPathGenerateRequest,
 )
 from app.services.event_bus import publish_event
 from app.services.personalization import approve_draft, generate_draft
 
 router = APIRouter(prefix="/personalization", tags=["personalization"])
+personalize_router = APIRouter(prefix="/personalize", tags=["personalization"])
 
 
 @router.post(
@@ -101,6 +107,11 @@ async def patch_draft(
 ) -> PersonalizationDraft:
     """Patch editable draft fields."""
     draft = await _get_draft_or_404(db, draft_id)
+    if draft.status in {DraftStatus.APPROVED.value, DraftStatus.SENT.value}:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Approved or sent drafts cannot be edited",
+        )
     data = body.model_dump(exclude_unset=True)
     for key, value in data.items():
         setattr(draft, key, value)
@@ -128,31 +139,22 @@ async def stream_draft(
 ) -> StreamingResponse:
     """Stream draft tokens as typed SSE events."""
     draft = await _get_draft_or_404(db, draft_id)
-    text = draft.email_body or draft.linkedin_message or ""
 
     async def event_generator():
         channel = f"sse:{draft.id}"
         pubsub = redis_client.pubsub()
         try:
             await pubsub.subscribe(channel)
+            pool = await create_pool(RedisSettings.from_dsn(settings.REDIS_URL))
+            try:
+                await pool.enqueue_job("stream_draft_tokens", str(draft.id))
+            finally:
+                await pool.close()
         except Exception:
+            text = draft.email_body or draft.linkedin_message or ""
             async for chunk in _fallback_token_stream(draft.id, text):
                 yield chunk
             return
-
-        async def producer() -> None:
-            for token in text.split():
-                payload = {"draft_id": str(draft.id), "token": f"{token} "}
-                event = {"type": "draft.token", "payload": payload}
-                await publish_event("draft.token", payload)
-                await redis_client.publish(
-                    channel,
-                    json.dumps(event),
-                )
-                await asyncio.sleep(0.02)
-            await redis_client.publish(channel, "__done__")
-
-        task = asyncio.create_task(producer())
         try:
             while True:
                 message = await pubsub.get_message(
@@ -160,8 +162,6 @@ async def stream_draft(
                     timeout=5.0,
                 )
                 if message is None:
-                    if task.done():
-                        break
                     yield ": keepalive\n\n"
                     continue
                 data = str(message.get("data", ""))
@@ -169,9 +169,6 @@ async def stream_draft(
                     break
                 yield f"event: draft.token\ndata: {data}\n\n"
         finally:
-            task.cancel()
-            with suppress(Exception, asyncio.CancelledError):
-                await task
             with suppress(Exception):
                 await pubsub.unsubscribe(channel)
                 await pubsub.close()
@@ -205,3 +202,80 @@ async def _fallback_token_stream(
         event = {"type": "draft.token", "payload": payload}
         yield f"event: draft.token\ndata: {json.dumps(event)}\n\n"
         await asyncio.sleep(0.02)
+
+
+@personalize_router.post(
+    "/batch",
+    response_model=list[PersonalizationDraftRead],
+    status_code=status.HTTP_201_CREATED,
+)
+async def personalize_batch(
+    body: PersonalizationBatchRequest,
+    db: AsyncSession = Depends(get_db),
+) -> list[PersonalizationDraft]:
+    """PRD-compatible batch personalization alias."""
+    return await generate_batch(body=body, db=db)
+
+
+@personalize_router.patch(
+    "/drafts/{draft_id}",
+    response_model=PersonalizationDraftRead,
+)
+async def personalize_patch_draft(
+    draft_id: uuid.UUID,
+    body: PersonalizationDraftPatch,
+    db: AsyncSession = Depends(get_db),
+) -> PersonalizationDraft:
+    """PRD-compatible draft patch alias."""
+    return await patch_draft(draft_id=draft_id, body=body, db=db)
+
+
+@personalize_router.post(
+    "/drafts/{draft_id}/approve",
+    response_model=PersonalizationDraftRead,
+)
+async def personalize_approve_draft(
+    draft_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+) -> PersonalizationDraft:
+    """PRD-compatible draft approval alias."""
+    return await approve(draft_id=draft_id, db=db)
+
+
+@personalize_router.post(
+    "/{lead_id}",
+    response_model=PersonalizationDraftRead,
+    status_code=status.HTTP_201_CREATED,
+)
+async def personalize_lead(
+    lead_id: uuid.UUID,
+    body: PersonalizationPathGenerateRequest | None = None,
+    db: AsyncSession = Depends(get_db),
+) -> PersonalizationDraft:
+    """PRD-compatible path-param personalization alias."""
+    path_body = body or PersonalizationPathGenerateRequest()
+    payload = PersonalizationGenerateRequest(
+        lead_id=lead_id,
+        sequence_id=path_body.sequence_id,
+        sequence_step_id=path_body.sequence_step_id,
+        enrollment_id=path_body.enrollment_id,
+        signal_id=path_body.signal_id,
+    )
+    return await generate_single(body=payload, db=db)
+
+
+@personalize_router.get(
+    "/{lead_id}/drafts",
+    response_model=list[PersonalizationDraftRead],
+)
+async def list_lead_drafts(
+    lead_id: uuid.UUID,
+    status_filter: str | None = Query(default=None, alias="status"),
+    db: AsyncSession = Depends(get_db),
+) -> list[PersonalizationDraft]:
+    """PRD-compatible lead draft listing alias."""
+    return await list_drafts(
+        lead_id=lead_id,
+        status_filter=status_filter,
+        db=db,
+    )

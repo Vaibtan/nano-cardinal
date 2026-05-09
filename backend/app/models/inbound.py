@@ -70,6 +70,7 @@ class InboundEvent(Base):
             "uq_inbound_events_fingerprint",
             event_fingerprint,
             unique=True,
+            postgresql_where=event_fingerprint.isnot(None),
         ),
         Index(
             "uq_inbound_source_event_id",

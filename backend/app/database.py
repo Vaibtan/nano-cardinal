@@ -50,6 +50,12 @@ def _track_write_statements(orm_execute_state) -> None:
     orm_execute_state.session.info[_WRITE_FLAG] = True
 
 
+@event.listens_for(AsyncSession.sync_session_class, "after_flush")
+def _track_flushed_orm_writes(session, _flush_context) -> None:
+    """Mark sessions that flushed ORM writes before dependency teardown."""
+    session.info[_WRITE_FLAG] = True
+
+
 def session_has_pending_writes(session: AsyncSession) -> bool:
     """Return True if session contains ORM or Core-level writes."""
     if session.new or session.dirty or session.deleted:

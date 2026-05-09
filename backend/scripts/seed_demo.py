@@ -18,6 +18,7 @@ from app.models.sender import SenderProfile
 from app.models.sequence import Sequence
 from app.schemas.sequence import SequenceCreate, SequenceStepCreate
 from app.services.enrichment import run_enrichment_pipeline
+from app.services.inbound import process_inbound_payload
 from app.services.personalization import generate_draft, seed_winning_snippets
 from app.services.sequences import (
     create_sequence,
@@ -41,6 +42,7 @@ async def main() -> None:
         await run_mock_signal_scan(db)
         await seed_winning_snippets(db)
         sequence = await _ensure_sequence(db, icp)
+        await _ensure_inbound_events(db)
         await enroll_lead(db, sequence, leads[0])
         await generate_draft(db, leads[0])
         await execute_due_enrollments(db)
@@ -162,6 +164,40 @@ async def _ensure_sequence(db, icp: ICP) -> Sequence:
         ],
     )
     return await create_sequence(db, body)
+
+
+async def _ensure_inbound_events(db) -> None:
+    """Seed inbound events for analytics and auto-enroll demos."""
+    payloads = [
+        (
+            "manual",
+            {
+                "id": "demo-inbound-001",
+                "event_type": "PRODUCT_SIGNUP",
+                "email": "priya@intentcloud.io",
+                "first_name": "Priya",
+                "last_name": "Menon",
+                "company_name": "IntentCloud",
+                "company_domain": "intentcloud.io",
+            },
+        ),
+        (
+            "google_ads",
+            {
+                "conversion_action": "demo-request",
+                "gclid": "demo-gclid-001",
+                "user_data": {
+                    "email": "alex@pipelinepilot.ai",
+                    "first_name": "Alex",
+                    "last_name": "Morgan",
+                },
+                "company_name": "PipelinePilot",
+                "company_domain": "pipelinepilot.ai",
+            },
+        ),
+    ]
+    for source, payload in payloads:
+        await process_inbound_payload(db, source, payload)
 
 
 _DEMO_LEADS = [

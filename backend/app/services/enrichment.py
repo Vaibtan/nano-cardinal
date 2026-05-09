@@ -205,6 +205,9 @@ async def step_embedding_generation(
     db: AsyncSession,
 ) -> dict[str, Any]:
     """Step 5: Generate embedding and store in pgvector column."""
+    if not settings.USE_MOCK_ENRICHMENT:
+        _require_real_integration("Embedding generation")
+
     text = build_embedding_text(lead, enriched)
     enriched["_embedding_text"] = text
 

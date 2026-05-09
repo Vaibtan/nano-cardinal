@@ -887,9 +887,11 @@ python
 
 **`GET    /api/v1/personalize/{lead_id}/drafts        — All drafts for a lead`**
 
-**`PATCH  /api/v1/personalize/{draft_id}              — Edit draft body/subject manually`**
+**`PATCH  /api/v1/personalize/drafts/{draft_id}       — Edit draft body/subject manually`**
 
-**`POST   /api/v1/personalize/{draft_id}/approve      — Approve draft; if linked to sequence enrollment, set enrollment ACTIVE and next_step_at=NOW()`**
+**`POST   /api/v1/personalize/drafts/{draft_id}/approve — Approve draft; if linked to sequence enrollment, set enrollment ACTIVE and next_step_at=NOW()`**
+
+**Compatibility note:** the implementation also exposes the legacy `/api/v1/personalization/...` routes used by earlier frontend work. The PRD-compatible aliases above are the canonical external API shape.
 
 **Draft status transition rules:**
 

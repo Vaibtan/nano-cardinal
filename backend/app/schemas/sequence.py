@@ -5,7 +5,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, Field, model_validator
 
-from app.models.enums import Channel, StepType
+from app.models.enums import Channel, EnrollmentStatus, StepType
 
 
 def _validate_step_channel(step_type: str, channel: str) -> None:
@@ -61,6 +61,15 @@ class SequenceStepUpdate(BaseModel):
     def validate_channel(self) -> "SequenceStepUpdate":
         if self.step_type and self.channel:
             _validate_step_channel(self.step_type, self.channel)
+        elif self.channel == Channel.LINKEDIN_ENGAGE.value:
+            raise ValueError(
+                "LINKEDIN_ENGAGE channel requires step_type=ENGAGEMENT",
+            )
+        elif self.step_type == StepType.ENGAGEMENT.value:
+            raise ValueError(
+                "ENGAGEMENT step updates must include "
+                "channel=LINKEDIN_ENGAGE",
+            )
         return self
 
 
@@ -128,6 +137,29 @@ class EnrollmentCreate(BaseModel):
     """Enroll a lead into a sequence."""
 
     lead_id: uuid.UUID
+
+
+class EnrollmentBatchCreate(BaseModel):
+    """Bulk-enroll leads by minimum ICP score."""
+
+    min_icp_score: float = Field(default=70.0, ge=0.0, le=100.0)
+    limit: int = Field(default=100, ge=1, le=1000)
+
+
+class EnrollmentUpdate(BaseModel):
+    """Update an enrollment state from the UI."""
+
+    status: str | None = None
+    reply_body: str | None = None
+
+    @model_validator(mode="after")
+    def validate_status(self) -> "EnrollmentUpdate":
+        if self.status and self.status not in {
+            EnrollmentStatus.ACTIVE.value,
+            EnrollmentStatus.PAUSED.value,
+        }:
+            raise ValueError("Only ACTIVE and PAUSED are editable statuses")
+        return self
 
 
 class EnrollmentRead(BaseModel):

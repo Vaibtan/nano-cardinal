@@ -17,6 +17,15 @@ class PersonalizationGenerateRequest(BaseModel):
     signal_id: uuid.UUID | None = None
 
 
+class PersonalizationPathGenerateRequest(BaseModel):
+    """Generate one draft where lead_id comes from the URL path."""
+
+    sequence_id: uuid.UUID | None = None
+    sequence_step_id: uuid.UUID | None = None
+    enrollment_id: uuid.UUID | None = None
+    signal_id: uuid.UUID | None = None
+
+
 class PersonalizationBatchRequest(BaseModel):
     """Generate drafts for several leads."""
 
